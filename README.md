@@ -15,7 +15,7 @@
 - 管理员保护：同步群管理员，避免误处理管理消息
 - 可选日志群：记录已处理消息的原因、分数和摘要
 
-## 快速部署
+## Debian VPS 部署
 
 1. 在 BotFather 创建机器人并取得 `BOT_TOKEN`。
 2. 把机器人拉进目标群。
@@ -28,29 +28,7 @@ cd telegram-moderation-bot
 sudo bash setup_debian.sh
 ```
 
-脚本会创建项目内 `.venv`、安装依赖、写入 `.env`、创建并启动 `tgadmin.service`。
-
-## 本地运行
-
-Windows：
-
-```bash
-python -m venv .venv
-.venv\Scripts\python -m pip install -r requirements.txt
-.venv\Scripts\python main.py
-```
-
-第一次运行会提示输入 `Telegram bot token`，并自动生成 `.env`。
-
-Linux：
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python main.py
-```
-
-第一次运行会提示输入 `Telegram bot token`，并自动生成 `.env`。
+脚本会自动创建项目内 `.venv`、安装依赖、写入 `.env`、创建并启动 `tgadmin.service`。第一次执行只需要输入一次 `Telegram bot token`，不需要手工复制配置文件。
 
 ## 管理入口
 
@@ -114,56 +92,7 @@ python3 -m venv .venv
 
 ## 配置
 
-多数场景只需要首次运行时输入一次 token。需要精细调参时再编辑 `.env`：
-
-```env
-BOT_TOKEN=your_telegram_bot_token
-LOG_CHAT_ID=
-ACTION=mute
-MUTE_DURATION_SECONDS=86400
-BAN_AFTER_STRIKES=0
-STRIKE_WINDOW_SECONDS=86400
-ADMIN_CACHE_TTL_SECONDS=300
-KEYWORDS=free money,crypto,airdrop
-KEYWORDS_FILE=data/keywords.txt
-KEYWORDS_FILES=
-AUTO_LOAD_TXT=true
-LEARNING_ENABLED=true
-LEARNING_MIN_HITS=3
-LEARNING_MIN_UNIQUE_USERS=2
-LEARNING_PROMOTE_HITS=6
-LEARNING_PROMOTE_UNIQUE_USERS=3
-LEARNING_IGNORE_HITS=4
-LEARNING_IGNORE_UNIQUE_USERS=2
-LEARNING_RETIRE_SECONDS=2592000
-LEARNING_WINDOW_SECONDS=86400
-DELETE_SCORE_THRESHOLD=20
-MUTE_SCORE_THRESHOLD=60
-BAN_SCORE_THRESHOLD=100
-LINK_SCORE=35
-KEYWORD_SCORE=60
-LEARNED_KEYWORD_SCORE=18
-USERNAME_SCORE=20
-LENGTH_SCORE=15
-FLOOD_SCORE=35
-REPEAT_SCORE=25
-STRUCTURE_SCORE=12
-COMBO_LINK_KEYWORD_BONUS=15
-COMBO_USERNAME_KEYWORD_BONUS=10
-COMBO_FLOOD_REPEAT_BONUS=10
-COMBO_STRUCTURE_LINK_BONUS=12
-RULE_ENABLE_LINK=true
-RULE_ENABLE_KEYWORDS=true
-RULE_ENABLE_USERNAME=true
-RULE_ENABLE_FLOOD=true
-RULE_ENABLE_REPEAT=true
-RULE_ENABLE_LENGTH=true
-MAX_MESSAGE_LENGTH=600
-FLOOD_MAX_MESSAGES=6
-FLOOD_WINDOW_SECONDS=10
-REPEAT_MAX_DUPES=2
-REPEAT_WINDOW_SECONDS=60
-```
+`setup_debian.sh` 会自动写入基础 `.env`。如果要精细调参，只需要在 VPS 上编辑 `.env`，不需要重新部署。
 
 关键配置：
 
