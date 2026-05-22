@@ -4,8 +4,10 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import re
 import time
+from typing import TYPE_CHECKING
 
-from .config import SettingsStore
+if TYPE_CHECKING:
+    from .config import SettingsStore
 
 
 TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}|[a-zA-Z0-9_@.]{3,}")
@@ -41,6 +43,8 @@ class CandidateState:
             self.records = deque()
 
     def add(self, now: float, user_id: int, window: int) -> tuple[int, int]:
+        if self.records is None:
+            raise RuntimeError("CandidateState.records was not initialized")
         self.records.append((now, user_id))
         while self.records and now - self.records[0][0] > window:
             self.records.popleft()
@@ -54,12 +58,14 @@ class AdaptiveKeywordLearner:
         self._store = store
         self._candidates: dict[str, CandidateState] = defaultdict(CandidateState)
 
-    def _should_skip(self, token: str, current_keywords: set[str]) -> bool:
+    def _should_skip(self, token: str) -> bool:
         if not token:
             return True
         if token in STOPWORDS:
             return True
-        if token in current_keywords:
+        if token in self._store.settings.keywords:
+            return True
+        if token in self._store.settings.ignored_keywords:
             return True
         if len(token) > 30:
             return True
@@ -79,20 +85,26 @@ class AdaptiveKeywordLearner:
         window = self._store.settings.learning_window_seconds
         min_hits = self._store.settings.learning_min_hits
         min_unique_users = self._store.settings.learning_min_unique_users
-        current_keywords = set(self._store.settings.keywords)
         promoted: list[str] = []
 
         for token in TOKEN_RE.findall(text.lower()):
-            token = token.strip(" _-.@")
-            if self._should_skip(token, current_keywords):
+            candidate = token.strip(" _-.@")
+            if self._should_skip(candidate):
                 continue
 
-            state = self._candidates[token]
-            hits, unique_users = state.add(now, user_id, window)
+            if candidate in self._store.settings.learned_keywords:
+                self._store.touch_learned_keyword(candidate, now)
+                continue
 
-            if hits >= min_hits and unique_users >= min_unique_users:
-                if self._store.add_keyword(token):
-                    promoted.append(token)
-                self._candidates.pop(token, None)
+            state = self._candidates[candidate]
+            hits, unique_users = state.add(now, user_id, window)
+            if hits < min_hits or unique_users < min_unique_users:
+                continue
+
+            result = self._store.add_learned_keyword(candidate, hits, unique_users, now)
+            promoted.append(candidate)
+            self._candidates.pop(candidate, None)
+            if result == "promoted":
+                continue
 
         return promoted

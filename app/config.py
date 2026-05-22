@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 import json
 import os
+import time
+from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -42,6 +44,10 @@ def _getenv_csv(key: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _normalize_keyword(value: str) -> str:
+    return value.strip().lower()
+
+
 def _load_keywords(file_path: Path) -> list[str]:
     if not file_path.exists():
         return []
@@ -49,17 +55,17 @@ def _load_keywords(file_path: Path) -> list[str]:
         content = file_path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         content = file_path.read_text(encoding="gbk", errors="ignore")
-    lines: list[str] = []
+    keywords: list[str] = []
     for raw in content.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        lines.append(line.lower())
-    return lines
+        keywords.append(_normalize_keyword(line))
+    return keywords
 
 
 def _dedupe(items: list[str]) -> list[str]:
-    return list(dict.fromkeys(items))
+    return list(dict.fromkeys(item for item in items if item))
 
 
 def _resolve_keyword_files(base_dir: Path) -> list[Path]:
@@ -81,15 +87,14 @@ def _resolve_keyword_files(base_dir: Path) -> list[Path]:
             if not folder.exists():
                 continue
             for path in folder.glob("*.txt"):
-                if path.name.lower() in {"requirements.txt"}:
+                if path.name.lower() == "requirements.txt":
                     continue
                 files.append(path)
 
     unique: dict[str, Path] = {}
     for path in files:
-        key = str(path.resolve()).lower()
         if path.exists():
-            unique[key] = path
+            unique[str(path.resolve()).lower()] = path
     return list(unique.values())
 
 
@@ -100,7 +105,7 @@ def _load_keywords_files(files: list[Path]) -> list[str]:
     return keywords
 
 
-def _load_state(path: Path) -> dict:
+def _load_state(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -109,7 +114,7 @@ def _load_state(path: Path) -> dict:
     return data
 
 
-def _save_state(path: Path, data: dict) -> None:
+def _save_state(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -117,16 +122,21 @@ def _save_state(path: Path, data: dict) -> None:
 class Settings:
     bot_token: str
     log_chat_id: int | None
-    mute_duration_seconds: int
     action: str
+    mute_duration_seconds: int
     ban_after_strikes: int
     strike_window_seconds: int
     admin_cache_ttl_seconds: int
     owner_user_ids: list[int]
     keywords: list[str]
+    learned_keywords: list[str]
+    ignored_keywords: list[str]
     learning_enabled: bool
     learning_min_hits: int
     learning_min_unique_users: int
+    learning_promote_hits: int
+    learning_promote_unique_users: int
+    learning_retire_seconds: int
     learning_window_seconds: int
     rule_enable_link: bool
     rule_enable_keywords: bool
@@ -139,11 +149,24 @@ class Settings:
     flood_window_seconds: int
     repeat_max_dupes: int
     repeat_window_seconds: int
+    delete_score_threshold: int
+    mute_score_threshold: int
+    ban_score_threshold: int
+    link_score: int
+    keyword_score: int
+    learned_keyword_score: int
+    username_score: int
+    length_score: int
+    flood_score: int
+    repeat_score: int
+    combo_link_keyword_bonus: int
+    combo_username_keyword_bonus: int
+    combo_flood_repeat_bonus: int
 
 
 STATE_KEYS = {
-    "mute_duration_seconds",
     "action",
+    "mute_duration_seconds",
     "ban_after_strikes",
     "rule_enable_link",
     "rule_enable_keywords",
@@ -159,14 +182,80 @@ STATE_KEYS = {
     "learning_enabled",
     "learning_min_hits",
     "learning_min_unique_users",
+    "learning_promote_hits",
+    "learning_promote_unique_users",
+    "learning_retire_seconds",
     "learning_window_seconds",
+    "delete_score_threshold",
+    "mute_score_threshold",
+    "ban_score_threshold",
+    "link_score",
+    "keyword_score",
+    "learned_keyword_score",
+    "username_score",
+    "length_score",
+    "flood_score",
+    "repeat_score",
+    "combo_link_keyword_bonus",
+    "combo_username_keyword_bonus",
+    "combo_flood_repeat_bonus",
 }
 
 
-def _apply_state(settings: Settings, state: dict) -> None:
+def _apply_state(settings: Settings, state: dict[str, Any]) -> None:
     for key in STATE_KEYS:
         if key in state:
             setattr(settings, key, state[key])
+
+
+def _load_learned_meta(raw: Any) -> dict[str, dict[str, Any]]:
+    meta: dict[str, dict[str, Any]] = {}
+    if not isinstance(raw, list):
+        return meta
+    for item in raw:
+        if isinstance(item, str):
+            keyword = _normalize_keyword(item)
+            if keyword:
+                meta[keyword] = {
+                    "keyword": keyword,
+                    "hits": 1,
+                    "unique_users": 1,
+                    "last_seen": 0.0,
+                }
+            continue
+        if not isinstance(item, dict):
+            continue
+        keyword = _normalize_keyword(str(item.get("keyword", "")))
+        if not keyword:
+            continue
+        hits = item.get("hits", 1)
+        unique_users = item.get("unique_users", 1)
+        last_seen = item.get("last_seen", 0.0)
+        try:
+            meta[keyword] = {
+                "keyword": keyword,
+                "hits": int(hits),
+                "unique_users": int(unique_users),
+                "last_seen": float(last_seen),
+            }
+        except (TypeError, ValueError):
+            continue
+    return meta
+
+
+def _serialize_learned_meta(meta: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    items = sorted(meta.values(), key=lambda item: float(item.get("last_seen", 0.0)), reverse=True)
+    result: list[dict[str, Any]] = []
+    for item in items:
+        result.append(
+            {
+                "keyword": str(item.get("keyword", "")).strip().lower(),
+                "hits": int(item.get("hits", 0)),
+                "unique_users": int(item.get("unique_users", 0)),
+                "last_seen": float(item.get("last_seen", 0.0)),
+            }
+        )
+    return result
 
 
 class SettingsStore:
@@ -177,6 +266,8 @@ class SettingsStore:
         keyword_files: list[Path],
         inline_keywords: list[str],
         custom_keywords: list[str],
+        learned_meta: dict[str, dict[str, Any]],
+        ignored_keywords: list[str],
         owner_user_ids: list[int],
     ) -> None:
         self._settings = settings
@@ -184,9 +275,12 @@ class SettingsStore:
         self._keyword_files = keyword_files
         self._inline_keywords = inline_keywords
         self._custom_keywords = custom_keywords
+        self._learned_meta = learned_meta
+        self._ignored_keywords = _dedupe(ignored_keywords)
         self._owner_user_ids = owner_user_ids
         self._settings.owner_user_ids = owner_user_ids
         self._last_file_keyword_count = 0
+        self._sync_learned_keywords()
         self.reload_keywords()
 
     @property
@@ -202,12 +296,24 @@ class SettingsStore:
         return self._custom_keywords
 
     @property
+    def learned_keywords(self) -> list[str]:
+        return list(self._learned_meta.keys())
+
+    @property
+    def ignored_keywords(self) -> list[str]:
+        return self._ignored_keywords
+
+    @property
     def owner_user_ids(self) -> list[int]:
         return self._owner_user_ids
 
     @property
     def last_file_keyword_count(self) -> int:
         return self._last_file_keyword_count
+
+    @property
+    def learned_keyword_count(self) -> int:
+        return len(self._learned_meta)
 
     def is_owner(self, user_id: int) -> bool:
         return user_id in self._owner_user_ids
@@ -221,29 +327,98 @@ class SettingsStore:
         self.save_state()
         return True
 
+    def _sync_learned_keywords(self) -> None:
+        now = time.time()
+        retire_seconds = self._settings.learning_retire_seconds
+        if retire_seconds > 0:
+            active_meta: dict[str, dict[str, Any]] = {}
+            for keyword, record in self._learned_meta.items():
+                last_seen = float(record.get("last_seen", 0.0))
+                if last_seen <= 0.0 or now - last_seen <= retire_seconds:
+                    active_meta[keyword] = record
+            self._learned_meta = active_meta
+        self._settings.learned_keywords = list(self._learned_meta.keys())
+        self._settings.ignored_keywords = list(self._ignored_keywords)
+
     def reload_keywords(self) -> int:
         file_keywords = _load_keywords_files(self._keyword_files)
         self._last_file_keyword_count = len(file_keywords)
         combined = self._inline_keywords + self._custom_keywords + file_keywords
         self._settings.keywords = _dedupe(combined)
+        self._sync_learned_keywords()
         return self._last_file_keyword_count
 
     def add_keyword(self, keyword: str) -> bool:
-        normalized = keyword.strip().lower()
+        normalized = _normalize_keyword(keyword)
         if not normalized:
             return False
         if normalized in self._custom_keywords:
             return False
         self._custom_keywords.append(normalized)
+        self._learned_meta.pop(normalized, None)
         self.reload_keywords()
         self.save_state()
         return True
 
+    def add_learned_keyword(self, keyword: str, hits: int, unique_users: int, now: float) -> str:
+        normalized = _normalize_keyword(keyword)
+        if (
+            not normalized
+            or normalized in self._ignored_keywords
+            or normalized in self._settings.keywords
+        ):
+            return "ignored"
+
+        record = self._learned_meta.get(
+            normalized,
+            {
+                "keyword": normalized,
+                "hits": 0,
+                "unique_users": 0,
+                "last_seen": now,
+            },
+        )
+        record["hits"] = max(int(record.get("hits", 0)), hits)
+        record["unique_users"] = max(int(record.get("unique_users", 0)), unique_users)
+        record["last_seen"] = now
+
+        if (
+            record["hits"] >= self._settings.learning_promote_hits
+            and record["unique_users"] >= self._settings.learning_promote_unique_users
+        ):
+            promoted = self.add_keyword(normalized)
+            if promoted:
+                return "promoted"
+            return "ignored"
+
+        self._learned_meta[normalized] = record
+        self._sync_learned_keywords()
+        self.save_state()
+        return "learned"
+
+    def touch_learned_keyword(self, keyword: str, now: float) -> None:
+        normalized = _normalize_keyword(keyword)
+        if normalized not in self._learned_meta:
+            return
+        self._learned_meta[normalized]["last_seen"] = now
+        self._sync_learned_keywords()
+        self.save_state()
+
+    def ignore_keyword(self, keyword: str) -> bool:
+        normalized = _normalize_keyword(keyword)
+        if not normalized or normalized in self._ignored_keywords:
+            return False
+        self._ignored_keywords.append(normalized)
+        self._learned_meta.pop(normalized, None)
+        self._sync_learned_keywords()
+        self.save_state()
+        return True
+
     def remove_keyword(self, keyword: str) -> bool:
-        normalized = keyword.strip().lower()
+        normalized = _normalize_keyword(keyword)
         if not normalized or normalized not in self._custom_keywords:
             return False
-        self._custom_keywords = [k for k in self._custom_keywords if k != normalized]
+        self._custom_keywords = [item for item in self._custom_keywords if item != normalized]
         self.reload_keywords()
         self.save_state()
         return True
@@ -256,10 +431,10 @@ class SettingsStore:
         return new_value
 
     def set_action(self, action: str) -> None:
-        action = action.strip().lower()
-        if action not in {"mute", "ban"}:
+        normalized = action.strip().lower()
+        if normalized not in {"mute", "ban"}:
             raise ValueError("action must be 'mute' or 'ban'")
-        self._settings.action = action
+        self._settings.action = normalized
         self.save_state()
 
     def set_mute_duration(self, seconds: int) -> None:
@@ -279,9 +454,11 @@ class SettingsStore:
 
     def save_state(self) -> None:
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {key: getattr(self._settings, key) for key in STATE_KEYS}
-        data["custom_keywords"] = self._custom_keywords
-        data["owner_user_ids"] = self._owner_user_ids
+        data: dict[str, Any] = {key: getattr(self._settings, key) for key in STATE_KEYS}
+        data["custom_keywords"] = list(self._custom_keywords)
+        data["learned_keywords"] = _serialize_learned_meta(self._learned_meta)
+        data["ignored_keywords"] = list(self._ignored_keywords)
+        data["owner_user_ids"] = list(self._owner_user_ids)
         _save_state(self._state_path, data)
 
 
@@ -299,10 +476,17 @@ def load_settings_store() -> SettingsStore:
 
     state = _load_state(STATE_FILE)
     custom_keywords = [
-        str(item).strip().lower()
+        _normalize_keyword(str(item))
         for item in state.get("custom_keywords", [])
-        if str(item).strip()
+        if _normalize_keyword(str(item))
     ]
+    learned_meta = _load_learned_meta(state.get("learned_keywords", []))
+    ignored_keywords = [
+        _normalize_keyword(str(item))
+        for item in state.get("ignored_keywords", [])
+        if _normalize_keyword(str(item))
+    ]
+
     raw_owner_ids = state.get("owner_user_ids", [])
     owner_user_ids: list[int] = []
     if isinstance(raw_owner_ids, list):
@@ -315,13 +499,22 @@ def load_settings_store() -> SettingsStore:
     settings = Settings(
         bot_token=token,
         log_chat_id=log_chat_id,
-        mute_duration_seconds=_getenv_int("MUTE_DURATION_SECONDS", 86400),
         action=action,
+        mute_duration_seconds=_getenv_int("MUTE_DURATION_SECONDS", 86400),
         ban_after_strikes=_getenv_int("BAN_AFTER_STRIKES", 0),
         strike_window_seconds=_getenv_int("STRIKE_WINDOW_SECONDS", 86400),
         admin_cache_ttl_seconds=_getenv_int("ADMIN_CACHE_TTL_SECONDS", 300),
         owner_user_ids=owner_user_ids,
         keywords=[],
+        learned_keywords=[],
+        ignored_keywords=[],
+        learning_enabled=_getenv_bool("LEARNING_ENABLED", True),
+        learning_min_hits=_getenv_int("LEARNING_MIN_HITS", 3),
+        learning_min_unique_users=_getenv_int("LEARNING_MIN_UNIQUE_USERS", 2),
+        learning_promote_hits=_getenv_int("LEARNING_PROMOTE_HITS", 6),
+        learning_promote_unique_users=_getenv_int("LEARNING_PROMOTE_UNIQUE_USERS", 3),
+        learning_retire_seconds=_getenv_int("LEARNING_RETIRE_SECONDS", 2592000),
+        learning_window_seconds=_getenv_int("LEARNING_WINDOW_SECONDS", 86400),
         rule_enable_link=_getenv_bool("RULE_ENABLE_LINK", True),
         rule_enable_keywords=_getenv_bool("RULE_ENABLE_KEYWORDS", True),
         rule_enable_username=_getenv_bool("RULE_ENABLE_USERNAME", True),
@@ -333,10 +526,19 @@ def load_settings_store() -> SettingsStore:
         flood_window_seconds=_getenv_int("FLOOD_WINDOW_SECONDS", 10),
         repeat_max_dupes=_getenv_int("REPEAT_MAX_DUPES", 2),
         repeat_window_seconds=_getenv_int("REPEAT_WINDOW_SECONDS", 60),
-        learning_enabled=_getenv_bool("LEARNING_ENABLED", True),
-        learning_min_hits=_getenv_int("LEARNING_MIN_HITS", 3),
-        learning_min_unique_users=_getenv_int("LEARNING_MIN_UNIQUE_USERS", 2),
-        learning_window_seconds=_getenv_int("LEARNING_WINDOW_SECONDS", 86400),
+        delete_score_threshold=_getenv_int("DELETE_SCORE_THRESHOLD", 20),
+        mute_score_threshold=_getenv_int("MUTE_SCORE_THRESHOLD", 60),
+        ban_score_threshold=_getenv_int("BAN_SCORE_THRESHOLD", 100),
+        link_score=_getenv_int("LINK_SCORE", 35),
+        keyword_score=_getenv_int("KEYWORD_SCORE", 60),
+        learned_keyword_score=_getenv_int("LEARNED_KEYWORD_SCORE", 18),
+        username_score=_getenv_int("USERNAME_SCORE", 20),
+        length_score=_getenv_int("LENGTH_SCORE", 15),
+        flood_score=_getenv_int("FLOOD_SCORE", 35),
+        repeat_score=_getenv_int("REPEAT_SCORE", 25),
+        combo_link_keyword_bonus=_getenv_int("COMBO_LINK_KEYWORD_BONUS", 15),
+        combo_username_keyword_bonus=_getenv_int("COMBO_USERNAME_KEYWORD_BONUS", 10),
+        combo_flood_repeat_bonus=_getenv_int("COMBO_FLOOD_REPEAT_BONUS", 10),
     )
 
     _apply_state(settings, state)
@@ -349,6 +551,8 @@ def load_settings_store() -> SettingsStore:
         keyword_files,
         inline_keywords,
         custom_keywords,
+        learned_meta,
+        ignored_keywords,
         owner_user_ids,
     )
 

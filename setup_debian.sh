@@ -9,10 +9,16 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="tgadmin"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+VENV_DIR="${ROOT_DIR}/.venv"
 
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update
-  apt-get install -y python3 python3-pip
+  apt-get install -y python3 python3-pip python3-venv
+fi
+
+if ! python3 -m venv --help >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y python3-venv
 fi
 
 if [[ ! -f "${ROOT_DIR}/requirements.txt" ]]; then
@@ -37,7 +43,9 @@ LEARNING_ENABLED=true
 RULE_ENABLE_USERNAME=true
 EOF
 
-python3 -m pip install -r "${ROOT_DIR}/requirements.txt"
+python3 -m venv "${VENV_DIR}"
+"${VENV_DIR}/bin/python" -m pip install --upgrade pip
+"${VENV_DIR}/bin/python" -m pip install -r "${ROOT_DIR}/requirements.txt"
 
 cat > "${SERVICE_FILE}" <<EOF
 [Unit]
@@ -47,7 +55,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${ROOT_DIR}
-ExecStart=/usr/bin/python3 ${ROOT_DIR}/main.py
+ExecStart=${VENV_DIR}/bin/python ${ROOT_DIR}/main.py
 Restart=always
 EnvironmentFile=${ROOT_DIR}/.env
 

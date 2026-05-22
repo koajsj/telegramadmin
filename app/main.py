@@ -4,6 +4,7 @@ import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from telegram import (
     BotCommand,
@@ -14,8 +15,9 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatMemberStatus
-from telegram.error import BadRequest, Forbidden
+from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import (
+    Application,
     ApplicationBuilder,
     CallbackQueryHandler,
     CommandHandler,
@@ -42,12 +44,13 @@ class AdminCache:
         self._ttl = ttl_seconds
         self._cache: dict[tuple[int, int], tuple[bool, float]] = {}
 
-    async def is_admin(self, bot, chat_id: int, user_id: int) -> bool:
+    async def is_admin(self, bot: Any, chat_id: int, user_id: int) -> bool:
         key = (chat_id, user_id)
         now = time.time()
         cached = self._cache.get(key)
         if cached and cached[1] > now:
             return cached[0]
+
         member = await bot.get_chat_member(chat_id, user_id)
         is_admin = member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
         self._cache[key] = (is_admin, now + self._ttl)
@@ -78,11 +81,13 @@ def _is_private_admin(update: Update) -> bool:
 
 
 def _format_seconds(seconds: int) -> str:
-    if seconds % 86400 == 0 and seconds != 0:
+    if seconds == 0:
+        return "仅删除消息"
+    if seconds % 86400 == 0:
         return f"{seconds // 86400}天"
-    if seconds % 3600 == 0 and seconds != 0:
+    if seconds % 3600 == 0:
         return f"{seconds // 3600}小时"
-    if seconds % 60 == 0 and seconds != 0:
+    if seconds % 60 == 0:
         return f"{seconds // 60}分钟"
     return f"{seconds}秒"
 
@@ -91,84 +96,70 @@ def _flag(value: bool) -> str:
     return "开" if value else "关"
 
 
+def _action_label(action: str) -> str:
+    return "封禁" if action == "ban" else "禁言"
+
+
+async def _reply_text(update: Update, text: str) -> None:
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(text)
+
+
 def _status_text(user_id: int | None) -> str:
-    action_label = "封禁" if settings.action == "ban" else "禁言"
-    keyword_files = len(settings_store.keyword_files)
-    custom_keywords = len(settings_store.custom_keywords)
-    owner_state = (
-        f"已设置: {', '.join(str(item) for item in settings_store.owner_user_ids)}"
-        if settings_store.owner_user_ids
-        else "未设置"
-    )
-    user_line = f"你的ID: {user_id}\n" if user_id else ""
+    user_line = f"你的 Telegram ID：{user_id}\n" if user_id is not None else ""
     return (
-        "✅ 后台管理\n"
+        "后台管理\n"
         f"{user_line}"
-        f"主人: {owner_state}\n"
-        f"处理动作: {action_label}\n"
-        f"禁言时长: {_format_seconds(settings.mute_duration_seconds)}\n"
-        f"关键词数量: {len(settings.keywords)} (文件{keyword_files}个, 自定义{custom_keywords}个)\n"
-        f"自学习: {_flag(settings.learning_enabled)}\n"
-        f"刷屏规则: {settings.flood_max_messages}条/{settings.flood_window_seconds}秒\n"
-        f"规则: 链接{_flag(settings.rule_enable_link)} "
-        f"关键词{_flag(settings.rule_enable_keywords)} "
-        f"用户名{_flag(settings.rule_enable_username)} "
-        f"刷屏{_flag(settings.rule_enable_flood)} "
-        f"重复{_flag(settings.rule_enable_repeat)} "
-        f"长度{_flag(settings.rule_enable_length)}\n"
-        f"管理员同步: {admin_registry.admin_count} (群{admin_registry.known_chat_count}个)\n"
-        "指令: /mute 3600 | /action mute|ban | /flood 6 10 | /reloadkeywords | /addkeyword 词 | /delkeyword 词 | /learn"
+        f"主人：{', '.join(str(item) for item in settings_store.owner_user_ids) or '未设置'}\n"
+        f"处理动作：{_action_label(settings.action)}\n"
+        f"分数阈值：删除 {settings.delete_score_threshold} / 禁言 {settings.mute_score_threshold} / 封禁 {settings.ban_score_threshold}\n"
+        f"禁言时长：{_format_seconds(settings.mute_duration_seconds)}\n"
+        f"高危关键词：{len(settings.keywords)} 个\n"
+        f"学习关键词：{settings_store.learned_keyword_count} 个\n"
+        f"忽略词：{len(settings_store.ignored_keywords)} 个\n"
+        f"自学习：{_flag(settings.learning_enabled)}\n"
+        f"刷屏规则：{settings.flood_max_messages} 条 / {settings.flood_window_seconds} 秒\n"
+        "规则开关："
+        f"链接{_flag(settings.rule_enable_link)}，"
+        f"关键词{_flag(settings.rule_enable_keywords)}，"
+        f"用户名{_flag(settings.rule_enable_username)}，"
+        f"刷屏{_flag(settings.rule_enable_flood)}，"
+        f"重复{_flag(settings.rule_enable_repeat)}，"
+        f"超长{_flag(settings.rule_enable_length)}\n"
+        f"管理员同步：{admin_registry.admin_count} 人，已记录群 {admin_registry.known_chat_count} 个\n\n"
+        "常用命令：\n"
+        "/status | /reloadkeywords | /action mute | /action ban\n"
+        "/mute 2h | /flood 6 10 | /addkeyword 关键词 | /delkeyword 关键词 | /learn"
     )
+
+
+def _toggle_button(label: str, field: str, enabled: bool) -> InlineKeyboardButton:
+    return InlineKeyboardButton(f"{label}：{_flag(enabled)}", callback_data=f"toggle:{field}")
 
 
 def _build_keyboard() -> InlineKeyboardMarkup:
+    action_target = "ban" if settings.action == "mute" else "mute"
     keyboard = [
         [
-            InlineKeyboardButton(
-                f"链接检测 {_flag(settings.rule_enable_link)}",
-                callback_data="toggle:rule_enable_link",
-            ),
-            InlineKeyboardButton(
-                f"关键词过滤 {_flag(settings.rule_enable_keywords)}",
-                callback_data="toggle:rule_enable_keywords",
-            ),
+            _toggle_button("链接检测", "rule_enable_link", settings.rule_enable_link),
+            _toggle_button("关键词过滤", "rule_enable_keywords", settings.rule_enable_keywords),
         ],
         [
-            InlineKeyboardButton(
-                f"用户名过滤 {_flag(settings.rule_enable_username)}",
-                callback_data="toggle:rule_enable_username",
-            ),
+            _toggle_button("用户名过滤", "rule_enable_username", settings.rule_enable_username),
+            _toggle_button("自学习", "learning_enabled", settings.learning_enabled),
         ],
         [
-            InlineKeyboardButton(
-                f"刷屏拦截 {_flag(settings.rule_enable_flood)}",
-                callback_data="toggle:rule_enable_flood",
-            ),
-            InlineKeyboardButton(
-                f"重复消息 {_flag(settings.rule_enable_repeat)}",
-                callback_data="toggle:rule_enable_repeat",
-            ),
+            _toggle_button("刷屏拦截", "rule_enable_flood", settings.rule_enable_flood),
+            _toggle_button("重复消息", "rule_enable_repeat", settings.rule_enable_repeat),
         ],
         [
-            InlineKeyboardButton(
-                f"超长消息 {_flag(settings.rule_enable_length)}",
-                callback_data="toggle:rule_enable_length",
-            ),
-            InlineKeyboardButton(
-                "处理动作 切换为封禁" if settings.action == "mute" else "处理动作 切换为禁言",
-                callback_data="action:ban" if settings.action == "mute" else "action:mute",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                f"自学习 {_flag(settings.learning_enabled)}",
-                callback_data="toggle:learning_enabled",
-            ),
+            _toggle_button("超长消息", "rule_enable_length", settings.rule_enable_length),
+            InlineKeyboardButton(f"处理：切换为{_action_label(action_target)}", callback_data=f"action:{action_target}"),
         ],
         [
             InlineKeyboardButton("刷屏 5条/10秒", callback_data="flood:5:10"),
             InlineKeyboardButton("刷屏 8条/10秒", callback_data="flood:8:10"),
-            InlineKeyboardButton("刷屏 10条/30秒", callback_data="flood:10:30"),
         ],
         [
             InlineKeyboardButton("禁言 1小时", callback_data="mute:3600"),
@@ -184,12 +175,14 @@ def _build_keyboard() -> InlineKeyboardMarkup:
 
 
 def _parse_duration(value: str) -> int | None:
-    value = value.strip().lower()
-    if value.isdigit():
-        return int(value)
-    match = re.fullmatch(r"(\d+)([smhd])", value)
-    if not match:
+    cleaned_value = value.strip().lower()
+    if cleaned_value.isdigit():
+        return int(cleaned_value)
+
+    match = re.fullmatch(r"(\d+)([smhd])", cleaned_value)
+    if match is None:
         return None
+
     amount = int(match.group(1))
     unit = match.group(2)
     if unit == "s":
@@ -204,226 +197,315 @@ def _parse_duration(value: str) -> int | None:
 
 
 async def _reject_private_admin(update: Update) -> None:
-    message = update.effective_message
-    if message is None:
-        return
-    await message.reply_text(
-        "未授权。你需要是机器人主人或群管理员。"
-        "请在群里发一条消息让机器人同步管理员列表。"
+    await _reply_text(
+        update,
+        "未授权。你需要是机器人主人或已同步的群管理员。\n"
+        "请先在群里发送一条消息，让机器人记录并同步群管理员列表。",
     )
 
 
 async def _try_claim_owner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_private_chat(update):
         return
+
     user = update.effective_user
-    if user is None:
+    if user is None or settings_store.owner_user_ids:
         return
-    if settings_store.owner_user_ids:
-        return
+
     await admin_registry.refresh_known_chats(context.bot)
     if not admin_registry.is_admin(user.id):
         return
+
     if settings_store.ensure_owner(user.id):
-        message = update.effective_message
-        if message is not None:
-            await message.reply_text("已将你设置为机器人主人（最高权限）。")
+        await _reply_text(update, "已将你设为机器人主人。")
+
+
+async def _require_private_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if not _is_private_chat(update):
+        return False
+
+    await admin_registry.refresh_known_chats(context.bot)
+    await _try_claim_owner(update, context)
+    if _is_private_admin(update):
+        return True
+
+    await _reject_private_admin(update)
+    return False
 
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    await _try_claim_owner(update, context)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
-    user_id = update.effective_user.id if update.effective_user else None
-    await update.effective_message.reply_text(
-        _status_text(user_id),
-        reply_markup=_build_keyboard(),
-    )
+
+    user_id = update.effective_user.id if update.effective_user is not None else None
+    message = update.effective_message
+    if message is not None:
+        await message.reply_text(_status_text(user_id), reply_markup=_build_keyboard())
 
 
 async def admin_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
-        return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
-    user_id = update.effective_user.id if update.effective_user else None
-    await update.effective_message.reply_text(
-        _status_text(user_id),
-        reply_markup=_build_keyboard(),
-    )
+    await admin_panel(update, context)
 
 
 async def admin_reload_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     count = settings_store.reload_keywords()
-    await update.effective_message.reply_text(
-        f"已重新载入词库，共 {count} 条文件关键词。"
-    )
+    await _reply_text(update, f"已重新载入词库，文件关键词 {count} 条。")
 
 
 async def admin_set_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     if not context.args:
-        await update.effective_message.reply_text("用法: /setaction mute 或 /setaction ban")
+        await _reply_text(update, "用法：/action mute 或 /action ban")
         return
+
     try:
         settings_store.set_action(context.args[0])
     except ValueError as exc:
-        await update.effective_message.reply_text(str(exc))
+        await _reply_text(update, str(exc))
         return
-    await update.effective_message.reply_text(f"处理动作已更新为 {settings.action}")
+
+    await _reply_text(update, f"处理动作已更新为：{_action_label(settings.action)}。")
 
 
 async def admin_set_mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     if not context.args:
-        await update.effective_message.reply_text("用法: /setmute 3600 或 /setmute 2h")
+        await _reply_text(update, "用法：/mute 3600、/mute 2h 或 /mute 1d")
         return
+
     duration = _parse_duration(context.args[0])
     if duration is None:
-        await update.effective_message.reply_text("无法解析时长，用法: /setmute 3600 或 /setmute 2h")
+        await _reply_text(update, "无法解析时长。支持纯秒数，或 30m、2h、1d。")
         return
+
     settings_store.set_mute_duration(duration)
-    await update.effective_message.reply_text(f"禁言时长已更新为 {_format_seconds(duration)}")
+    await _reply_text(update, f"禁言时长已更新为：{_format_seconds(duration)}。")
 
 
 async def admin_set_flood(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     if len(context.args) < 2:
-        await update.effective_message.reply_text("用法: /flood 6 10 （6条消息/10秒）")
+        await _reply_text(update, "用法：/flood 6 10，表示 10 秒内超过 6 条消息。")
         return
+
     try:
         max_messages = int(context.args[0])
         window_seconds = int(context.args[1])
         settings_store.set_flood_rule(max_messages, window_seconds)
     except ValueError as exc:
-        await update.effective_message.reply_text(f"参数错误: {exc}")
+        await _reply_text(update, f"参数错误：{exc}")
         return
-    await update.effective_message.reply_text(
-        f"刷屏规则已更新为 {settings.flood_max_messages}条/{settings.flood_window_seconds}秒"
-    )
+
+    await _reply_text(update, f"刷屏规则已更新为：{settings.flood_max_messages} 条 / {settings.flood_window_seconds} 秒。")
 
 
 async def admin_add_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     keyword = " ".join(context.args).strip()
     if not keyword:
-        await update.effective_message.reply_text("用法: /addkeyword 关键词")
+        await _reply_text(update, "用法：/addkeyword 关键词")
         return
+
     added = settings_store.add_keyword(keyword)
     if added:
-        await update.effective_message.reply_text("已添加并生效。")
+        await _reply_text(update, f"已添加并生效：{keyword}")
     else:
-        await update.effective_message.reply_text("添加失败（可能已存在或为空）。")
+        await _reply_text(update, "添加失败：关键词为空或已存在。")
 
 
 async def admin_del_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     keyword = " ".join(context.args).strip()
     if not keyword:
-        await update.effective_message.reply_text("用法: /delkeyword 关键词")
+        await _reply_text(update, "用法：/delkeyword 关键词")
         return
+
     removed = settings_store.remove_keyword(keyword)
     if removed:
-        await update.effective_message.reply_text("已移除并生效。")
+        await _reply_text(update, f"已移除并生效：{keyword}")
     else:
-        await update.effective_message.reply_text("移除失败（仅能移除自定义关键词）。")
+        await _reply_text(update, "移除失败：只能移除通过 /addkeyword 添加的自定义关键词。")
 
 
 async def admin_toggle_learning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not _is_private_chat(update):
+    if not await _require_private_admin(update, context):
         return
-    await admin_registry.refresh_known_chats(context.bot)
-    if not _is_private_admin(update):
-        await _reject_private_admin(update)
-        return
+
     new_value = settings_store.toggle("learning_enabled")
-    await update.effective_message.reply_text(
-        f"自学习功能已{'开启' if new_value else '关闭'}。"
-    )
+    await _reply_text(update, f"自学习功能已{_flag(new_value)}。")
 
 
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
         return
+
     await admin_registry.refresh_known_chats(context.bot)
     if not _is_private_admin(update):
         await query.answer("无权限", show_alert=True)
         return
+
     data = query.data or ""
-    if data.startswith("toggle:"):
-        field = data.split(":", 1)[1]
-        if hasattr(settings, field):
+    try:
+        if data.startswith("toggle:"):
+            field = data.split(":", 1)[1]
+            if field not in {
+                "rule_enable_link",
+                "rule_enable_keywords",
+                "rule_enable_username",
+                "rule_enable_flood",
+                "rule_enable_repeat",
+                "rule_enable_length",
+                "learning_enabled",
+            }:
+                await query.answer("未知开关", show_alert=True)
+                return
             settings_store.toggle(field)
-    elif data.startswith("action:"):
-        action = data.split(":", 1)[1]
-        try:
-            settings_store.set_action(action)
-        except ValueError:
-            await query.answer("动作不合法", show_alert=True)
-            return
-    elif data.startswith("mute:"):
-        try:
-            duration = int(data.split(":", 1)[1])
-        except ValueError:
-            await query.answer("时长不合法", show_alert=True)
-            return
-        settings_store.set_mute_duration(duration)
-    elif data.startswith("flood:"):
-        try:
+        elif data.startswith("action:"):
+            settings_store.set_action(data.split(":", 1)[1])
+        elif data.startswith("mute:"):
+            settings_store.set_mute_duration(int(data.split(":", 1)[1]))
+        elif data.startswith("flood:"):
             _, max_messages, window_seconds = data.split(":", 2)
             settings_store.set_flood_rule(int(max_messages), int(window_seconds))
-        except ValueError:
-            await query.answer("刷屏参数不合法", show_alert=True)
+        elif data == "reload:keywords":
+            settings_store.reload_keywords()
+        elif data == "status":
+            pass
+        else:
+            await query.answer("未知操作", show_alert=True)
             return
-    elif data == "reload:keywords":
-        settings_store.reload_keywords()
-    elif data == "status":
-        pass
-    else:
-        await query.answer("未知操作", show_alert=True)
+    except ValueError as exc:
+        await query.answer(f"参数错误：{exc}", show_alert=True)
         return
 
-    await query.answer()
-    user_id = update.effective_user.id if update.effective_user else None
+    await query.answer("已更新")
+    user_id = update.effective_user.id if update.effective_user is not None else None
     await query.edit_message_text(_status_text(user_id), reply_markup=_build_keyboard())
+
+
+async def _delete_spam_message(update: Update) -> bool:
+    message = update.effective_message
+    chat = update.effective_chat
+    if message is None or chat is None:
+        return False
+
+    try:
+        await message.delete()
+    except (BadRequest, Forbidden) as exc:
+        logger.warning("Failed to delete message", extra={"chat_id": chat.id, "error": str(exc)})
+        return False
+
+    return True
+
+
+async def _apply_action(update: Update, context: ContextTypes.DEFAULT_TYPE, score: int) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return
+
+    should_ban = score >= settings.ban_score_threshold or (
+        settings.action == "ban" and score >= settings.mute_score_threshold
+    )
+    should_mute = score >= settings.mute_score_threshold and not should_ban
+
+    if should_ban:
+        try:
+            await context.bot.ban_chat_member(chat.id, user.id)
+        except (BadRequest, Forbidden) as exc:
+            logger.warning(
+                "Failed to ban user",
+                extra={"chat_id": chat.id, "user_id": user.id, "error": str(exc)},
+            )
+        return
+
+    if not should_mute or settings.mute_duration_seconds <= 0:
+        return
+
+    until = datetime.now(timezone.utc) + timedelta(seconds=settings.mute_duration_seconds)
+    permissions = ChatPermissions(can_send_messages=False)
+    try:
+        await context.bot.restrict_chat_member(
+            chat.id,
+            user.id,
+            permissions=permissions,
+            until_date=until,
+        )
+    except (BadRequest, Forbidden) as exc:
+        logger.warning(
+            "Failed to mute user",
+            extra={"chat_id": chat.id, "user_id": user.id, "error": str(exc)},
+        )
+
+
+async def _apply_strike_ban(update: Update, context: ContextTypes.DEFAULT_TYPE, score: int) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None or settings.ban_after_strikes <= 0:
+        return
+    if score < settings.mute_score_threshold:
+        return
+
+    strikes = strike_tracker.add_strike(chat.id, user.id, time.time())
+    if strikes < settings.ban_after_strikes:
+        return
+
+    try:
+        await context.bot.ban_chat_member(chat.id, user.id)
+    except (BadRequest, Forbidden) as exc:
+        logger.warning(
+            "Failed to ban user after strikes",
+            extra={"chat_id": chat.id, "user_id": user.id, "strikes": strikes, "error": str(exc)},
+        )
+
+
+async def _log_moderation(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    reasons: list[str],
+    score: int,
+    text: str,
+    learned_terms: list[str],
+) -> None:
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None or settings.log_chat_id is None:
+        return
+
+    reason = ", ".join(reasons) if reasons else "rule"
+    learned = f"\n新学习：{', '.join(learned_terms)}" if learned_terms else ""
+    text_preview = text.replace("\n", " ")[:200]
+    log_text = (
+        "已处理消息\n"
+        f"群：{chat.id}\n"
+        f"用户：{user.id}\n"
+        f"分数：{score}\n"
+        f"原因：{reason}\n"
+        f"预览：{text_preview}"
+        f"{learned}"
+    )
+
+    try:
+        await context.bot.send_message(settings.log_chat_id, log_text)
+    except (BadRequest, Forbidden) as exc:
+        logger.warning(
+            "Failed to send moderation log",
+            extra={"log_chat_id": settings.log_chat_id, "error": str(exc)},
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -431,10 +513,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat = update.effective_chat
     user = update.effective_user
 
-    if message is None or chat is None or user is None:
-        return
-
-    if user.is_bot:
+    if message is None or chat is None or user is None or user.is_bot:
         return
 
     if chat.type not in {"group", "supergroup"}:
@@ -453,84 +532,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    username = user.username or ""
-    result = rule_engine.evaluate(text, chat.id, user.id)
-    if settings.rule_enable_username and username:
-        username_reasons = scan_static_reasons(
-            username,
-            settings.keywords,
-            enable_link=settings.rule_enable_link,
-            enable_keywords=settings.rule_enable_keywords,
-            enable_length=False,
-        )
-        username_reason = next(
-            (reason for reason in username_reasons if reason.startswith("keyword:") or reason == "link"),
-            None,
-        )
-        if username_reason and username_reason not in result.reasons:
-            result.reasons.append(f"username:{username_reason}")
-            result.is_spam = True
+    result = rule_engine.evaluate(text, chat.id, user.id, username=user.username)
     if not result.is_spam:
         return
 
-    try:
-        await message.delete()
-    except (BadRequest, Forbidden) as exc:
-        logger.warning("Failed to delete message in chat %s: %s", chat.id, exc)
+    deleted = await _delete_spam_message(update)
+    if not deleted:
         return
 
-    now = datetime.now(timezone.utc)
-    if settings.action == "ban":
-        try:
-            await context.bot.ban_chat_member(chat.id, user.id)
-        except (BadRequest, Forbidden) as exc:
-            logger.warning("Failed to ban user %s in chat %s: %s", user.id, chat.id, exc)
-    elif settings.mute_duration_seconds > 0:
-        until = now + timedelta(seconds=settings.mute_duration_seconds)
-        permissions = ChatPermissions(can_send_messages=False)
-        try:
-            await context.bot.restrict_chat_member(
-                chat.id,
-                user.id,
-                permissions=permissions,
-                until_date=until,
-            )
-        except (BadRequest, Forbidden) as exc:
-            logger.warning("Failed to mute user %s in chat %s: %s", user.id, chat.id, exc)
-
-    if settings.ban_after_strikes > 0:
-        strikes = strike_tracker.add_strike(chat.id, user.id, time.time())
-        if strikes >= settings.ban_after_strikes:
-            try:
-                await context.bot.ban_chat_member(chat.id, user.id)
-            except (BadRequest, Forbidden) as exc:
-                logger.warning("Failed to ban after strikes for user %s: %s", user.id, exc)
+    await _apply_action(update, context, result.score)
+    await _apply_strike_ban(update, context, result.score)
 
     learned_terms: list[str] = []
-    if settings.learning_enabled and not any(reason.startswith("keyword:") for reason in result.reasons):
+    if settings.learning_enabled:
         learned_terms = learner.observe(text, user.id)
 
-    if settings.log_chat_id:
-        reason = ", ".join(result.reasons) if result.reasons else "rule"
-        learned = f" Learned: {', '.join(learned_terms)}." if learned_terms else ""
-        text_preview = text.replace("\n", " ")[:200]
-        log_text = (
-            f"Deleted spam in chat {chat.id}. "
-            f"User {user.id}. Reasons: {reason}. "
-            f"Preview: {text_preview}."
-            f"{learned}"
-        )
-        try:
-            await context.bot.send_message(settings.log_chat_id, log_text)
-        except (BadRequest, Forbidden) as exc:
-            logger.warning("Failed to log to chat %s: %s", settings.log_chat_id, exc)
+    await _log_moderation(update, context, result.reasons, result.score, text, learned_terms)
 
 
 async def refresh_admins_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     await admin_registry.refresh_known_chats(context.bot)
 
 
-async def post_init(application) -> None:
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    error = context.error
+    if isinstance(error, TelegramError):
+        logger.warning("Telegram update failed", extra={"error": str(error), "update": str(update)})
+        return
+    logger.exception("Unhandled update error", extra={"update": str(update)})
+
+
+async def post_init(application: Application) -> None:
     commands = [
         BotCommand("start", "打开后台管理"),
         BotCommand("admin", "打开后台管理"),
@@ -543,10 +575,7 @@ async def post_init(application) -> None:
         BotCommand("delkeyword", "删除自定义关键词"),
         BotCommand("learn", "切换自学习功能"),
     ]
-    await application.bot.set_my_commands(
-        commands,
-        scope=BotCommandScopeAllPrivateChats(),
-    )
+    await application.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
 
 
 def main() -> None:
@@ -568,6 +597,7 @@ def main() -> None:
     application.add_handler(CommandHandler(["learn", "togglelearning"], admin_toggle_learning))
     application.add_handler(CallbackQueryHandler(admin_callback))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
+    application.add_error_handler(error_handler)
     application.run_polling(close_loop=False)
 
 
