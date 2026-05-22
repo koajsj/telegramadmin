@@ -136,6 +136,8 @@ class Settings:
     learning_min_unique_users: int
     learning_promote_hits: int
     learning_promote_unique_users: int
+    learning_ignore_hits: int
+    learning_ignore_unique_users: int
     learning_retire_seconds: int
     learning_window_seconds: int
     rule_enable_link: bool
@@ -159,9 +161,11 @@ class Settings:
     length_score: int
     flood_score: int
     repeat_score: int
+    structure_score: int
     combo_link_keyword_bonus: int
     combo_username_keyword_bonus: int
     combo_flood_repeat_bonus: int
+    combo_structure_link_bonus: int
 
 
 STATE_KEYS = {
@@ -184,6 +188,8 @@ STATE_KEYS = {
     "learning_min_unique_users",
     "learning_promote_hits",
     "learning_promote_unique_users",
+    "learning_ignore_hits",
+    "learning_ignore_unique_users",
     "learning_retire_seconds",
     "learning_window_seconds",
     "delete_score_threshold",
@@ -196,9 +202,11 @@ STATE_KEYS = {
     "length_score",
     "flood_score",
     "repeat_score",
+    "structure_score",
     "combo_link_keyword_bonus",
     "combo_username_keyword_bonus",
     "combo_flood_repeat_bonus",
+    "combo_structure_link_bonus",
 }
 
 
@@ -221,6 +229,8 @@ def _load_learned_meta(raw: Any) -> dict[str, dict[str, Any]]:
                     "hits": 1,
                     "unique_users": 1,
                     "last_seen": 0.0,
+                    "benign_hits": 0,
+                    "spam_hits": 0,
                 }
             continue
         if not isinstance(item, dict):
@@ -231,12 +241,16 @@ def _load_learned_meta(raw: Any) -> dict[str, dict[str, Any]]:
         hits = item.get("hits", 1)
         unique_users = item.get("unique_users", 1)
         last_seen = item.get("last_seen", 0.0)
+        benign_hits = item.get("benign_hits", 0)
+        spam_hits = item.get("spam_hits", 0)
         try:
             meta[keyword] = {
                 "keyword": keyword,
                 "hits": int(hits),
                 "unique_users": int(unique_users),
                 "last_seen": float(last_seen),
+                "benign_hits": int(benign_hits),
+                "spam_hits": int(spam_hits),
             }
         except (TypeError, ValueError):
             continue
@@ -253,6 +267,8 @@ def _serialize_learned_meta(meta: dict[str, dict[str, Any]]) -> list[dict[str, A
                 "hits": int(item.get("hits", 0)),
                 "unique_users": int(item.get("unique_users", 0)),
                 "last_seen": float(item.get("last_seen", 0.0)),
+                "benign_hits": int(item.get("benign_hits", 0)),
+                "spam_hits": int(item.get("spam_hits", 0)),
             }
         )
     return result
@@ -315,6 +331,28 @@ class SettingsStore:
     def learned_keyword_count(self) -> int:
         return len(self._learned_meta)
 
+    def learned_keyword_snapshot(self, limit: int) -> list[dict[str, Any]]:
+        items = sorted(
+            self._learned_meta.values(),
+            key=lambda item: (
+                int(item.get("hits", 0)),
+                float(item.get("last_seen", 0.0)),
+            ),
+            reverse=True,
+        )
+        snapshot: list[dict[str, Any]] = []
+        for item in items[:limit]:
+            snapshot.append(
+                {
+                    "keyword": str(item.get("keyword", "")),
+                    "hits": int(item.get("hits", 0)),
+                    "unique_users": int(item.get("unique_users", 0)),
+                    "benign_hits": int(item.get("benign_hits", 0)),
+                    "spam_hits": int(item.get("spam_hits", 0)),
+                }
+            )
+        return snapshot
+
     def is_owner(self, user_id: int) -> bool:
         return user_id in self._owner_user_ids
 
@@ -376,11 +414,14 @@ class SettingsStore:
                 "hits": 0,
                 "unique_users": 0,
                 "last_seen": now,
+                "benign_hits": 0,
+                "spam_hits": 0,
             },
         )
         record["hits"] = max(int(record.get("hits", 0)), hits)
         record["unique_users"] = max(int(record.get("unique_users", 0)), unique_users)
         record["last_seen"] = now
+        record["spam_hits"] = int(record.get("spam_hits", 0)) + 1
 
         if (
             record["hits"] >= self._settings.learning_promote_hits
@@ -396,6 +437,32 @@ class SettingsStore:
         self.save_state()
         return "learned"
 
+    def record_learned_feedback(self, keyword: str, is_spam: bool, now: float) -> str:
+        normalized = _normalize_keyword(keyword)
+        if normalized not in self._learned_meta:
+            return "missing"
+
+        record = self._learned_meta[normalized]
+        record["last_seen"] = now
+        if is_spam:
+            record["spam_hits"] = int(record.get("spam_hits", 0)) + 1
+        else:
+            record["benign_hits"] = int(record.get("benign_hits", 0)) + 1
+
+        if (
+            int(record.get("benign_hits", 0)) >= self._settings.learning_ignore_hits
+            and int(record.get("unique_users", 0)) >= self._settings.learning_ignore_unique_users
+        ):
+            self._ignored_keywords.append(normalized)
+            self._learned_meta.pop(normalized, None)
+            self._sync_learned_keywords()
+            self.save_state()
+            return "ignored"
+
+        self._sync_learned_keywords()
+        self.save_state()
+        return "updated"
+
     def touch_learned_keyword(self, keyword: str, now: float) -> None:
         normalized = _normalize_keyword(keyword)
         if normalized not in self._learned_meta:
@@ -403,6 +470,61 @@ class SettingsStore:
         self._learned_meta[normalized]["last_seen"] = now
         self._sync_learned_keywords()
         self.save_state()
+
+    def export_keywords_payload(self) -> dict[str, Any]:
+        return {
+            "custom_keywords": list(self._custom_keywords),
+            "learned_keywords": _serialize_learned_meta(self._learned_meta),
+            "ignored_keywords": list(self._ignored_keywords),
+            "owner_user_ids": list(self._owner_user_ids),
+        }
+
+    def import_keywords_payload(self, payload: dict[str, Any]) -> dict[str, int]:
+        imported = {"custom": 0, "learned": 0, "ignored": 0}
+        raw_custom = payload.get("custom_keywords", [])
+        if isinstance(raw_custom, list):
+            for item in raw_custom:
+                if self.add_keyword(str(item)):
+                    imported["custom"] += 1
+
+        raw_learned = payload.get("learned_keywords", [])
+        learned_meta = _load_learned_meta(raw_learned)
+        for keyword, record in learned_meta.items():
+            if keyword in self._ignored_keywords or keyword in self._settings.keywords:
+                continue
+            current = self._learned_meta.get(keyword)
+            if current is None:
+                self._learned_meta[keyword] = record
+            else:
+                current["hits"] = max(int(current.get("hits", 0)), int(record["hits"]))
+                current["unique_users"] = max(
+                    int(current.get("unique_users", 0)),
+                    int(record["unique_users"]),
+                )
+                current["last_seen"] = max(
+                    float(current.get("last_seen", 0.0)),
+                    float(record["last_seen"]),
+                )
+                current["benign_hits"] = max(
+                    int(current.get("benign_hits", 0)),
+                    int(record["benign_hits"]),
+                )
+                current["spam_hits"] = max(
+                    int(current.get("spam_hits", 0)),
+                    int(record["spam_hits"]),
+                )
+            imported["learned"] += 1
+
+        self._sync_learned_keywords()
+        self.save_state()
+
+        raw_ignored = payload.get("ignored_keywords", [])
+        if isinstance(raw_ignored, list):
+            for item in raw_ignored:
+                if self.ignore_keyword(str(item)):
+                    imported["ignored"] += 1
+
+        return imported
 
     def ignore_keyword(self, keyword: str) -> bool:
         normalized = _normalize_keyword(keyword)
@@ -513,6 +635,8 @@ def load_settings_store() -> SettingsStore:
         learning_min_unique_users=_getenv_int("LEARNING_MIN_UNIQUE_USERS", 2),
         learning_promote_hits=_getenv_int("LEARNING_PROMOTE_HITS", 6),
         learning_promote_unique_users=_getenv_int("LEARNING_PROMOTE_UNIQUE_USERS", 3),
+        learning_ignore_hits=_getenv_int("LEARNING_IGNORE_HITS", 4),
+        learning_ignore_unique_users=_getenv_int("LEARNING_IGNORE_UNIQUE_USERS", 2),
         learning_retire_seconds=_getenv_int("LEARNING_RETIRE_SECONDS", 2592000),
         learning_window_seconds=_getenv_int("LEARNING_WINDOW_SECONDS", 86400),
         rule_enable_link=_getenv_bool("RULE_ENABLE_LINK", True),
@@ -536,9 +660,11 @@ def load_settings_store() -> SettingsStore:
         length_score=_getenv_int("LENGTH_SCORE", 15),
         flood_score=_getenv_int("FLOOD_SCORE", 35),
         repeat_score=_getenv_int("REPEAT_SCORE", 25),
+        structure_score=_getenv_int("STRUCTURE_SCORE", 12),
         combo_link_keyword_bonus=_getenv_int("COMBO_LINK_KEYWORD_BONUS", 15),
         combo_username_keyword_bonus=_getenv_int("COMBO_USERNAME_KEYWORD_BONUS", 10),
         combo_flood_repeat_bonus=_getenv_int("COMBO_FLOOD_REPEAT_BONUS", 10),
+        combo_structure_link_bonus=_getenv_int("COMBO_STRUCTURE_LINK_BONUS", 12),
     )
 
     _apply_state(settings, state)

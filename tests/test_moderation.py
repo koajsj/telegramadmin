@@ -37,9 +37,11 @@ def make_settings(overrides: dict[str, Any]) -> SimpleNamespace:
         "length_score": 15,
         "flood_score": 35,
         "repeat_score": 25,
+        "structure_score": 12,
         "combo_link_keyword_bonus": 15,
         "combo_username_keyword_bonus": 10,
         "combo_flood_repeat_bonus": 10,
+        "combo_structure_link_bonus": 12,
     }
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -72,6 +74,18 @@ class ModerationRulesTests(unittest.TestCase):
         engine = RuleEngine(make_settings({"flood_max_messages": 1, "flood_window_seconds": 60}))
         self.assertFalse(engine.evaluate("hello", 1, 100).is_spam)
         self.assertTrue(engine.evaluate("hello again", 1, 100).is_spam)
+
+    def test_structure_hits_raise_score(self) -> None:
+        engine = RuleEngine(make_settings({}))
+        result = engine.evaluate("私聊我，带链接，返利更高", 1, 100)
+        self.assertTrue(result.score >= 12)
+        self.assertTrue(any(reason.startswith("structure:") for reason in result.reasons))
+
+    def test_spaced_keyword_bypass_is_normalized(self) -> None:
+        engine = RuleEngine(make_settings({}))
+        result = engine.evaluate("c a s i n o", 1, 100)
+        self.assertTrue(result.is_spam)
+        self.assertTrue(any(reason.startswith("keyword:") for reason in result.reasons))
 
 
 if __name__ == "__main__":

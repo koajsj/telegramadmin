@@ -4,20 +4,37 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import re
 import time
+import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .config import Settings
 
 
-LINK_RE = re.compile(r"(https?://|www\.|t\.me/)", re.IGNORECASE)
+LINK_RE = re.compile(
+    r"(https?://|www[\W_]*\.|t[\W_]*m[\W_]*e[\W_/]|telegram[\W_]*m[\W_]*e|bit[\W_]*ly|tinyurl[\W_]*com)",
+    re.IGNORECASE,
+)
 ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff]")
 SPACE_RE = re.compile(r"\s+")
+NON_TOKEN_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+STRUCTURE_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("contact", re.compile(r"(私聊|加我|联系|客服|vx|微信|whatsapp|telegram|tg|line|qq)")),
+    ("money", re.compile(r"(返利|套利|稳赚|高回报|收益|暴富|日结|包赔|提现|佣金|利润)")),
+    ("join", re.compile(r"(进群|拉群|拉人|入群|加群|群号|邀请码)")),
+    ("gambling", re.compile(r"(博彩|赌博|下注|casino|bet|棋牌|老虎机)")),
+    ("adult", re.compile(r"(色情|成人视频|自拍偷拍|约炮|无码|无码视频)")),
+]
 
 
 def _normalize(text: str) -> str:
-    cleaned = ZERO_WIDTH_RE.sub("", text)
+    cleaned = unicodedata.normalize("NFKC", text)
+    cleaned = ZERO_WIDTH_RE.sub("", cleaned)
     return SPACE_RE.sub(" ", cleaned.strip().lower())
+
+
+def _compact(text: str) -> str:
+    return NON_TOKEN_RE.sub("", text.lower())
 
 
 @dataclass
@@ -76,16 +93,25 @@ def _score_terms(
     score = 0
     reasons: list[str] = []
     matched_terms: list[str] = []
+    compact_normalized = _compact(normalized)
     for term in terms:
         normalized_term = term.strip().lower()
         if not normalized_term or normalized_term in ignored:
             continue
-        if normalized_term in normalized:
+        if normalized_term in normalized or _compact(normalized_term) in compact_normalized:
             score += weight
             reasons.append(f"{prefix}:{normalized_term}")
             matched_terms.append(normalized_term)
             break
     return score, reasons, matched_terms
+
+
+def _structure_hits(normalized: str) -> list[str]:
+    hits: list[str] = []
+    for label, pattern in STRUCTURE_PATTERNS:
+        if pattern.search(normalized):
+            hits.append(label)
+    return hits
 
 
 class RuleEngine:
@@ -104,6 +130,7 @@ class RuleEngine:
         link_hit = False
         flood_hit = False
         repeat_hit = False
+        structure_hits = _structure_hits(normalized)
 
         if self._settings.rule_enable_link and LINK_RE.search(normalized):
             score += self._settings.link_score
@@ -147,9 +174,17 @@ class RuleEngine:
             reasons.append("repeat")
             repeat_hit = True
 
+        if structure_hits:
+            score += self._settings.structure_score * len(structure_hits)
+            reasons.extend(f"structure:{item}" for item in structure_hits)
+
         if link_hit and keyword_hit:
             score += self._settings.combo_link_keyword_bonus
             reasons.append("combo:link+keyword")
+
+        if link_hit and structure_hits:
+            score += self._settings.combo_structure_link_bonus
+            reasons.append("combo:link+structure")
 
         if username is not None and self._settings.rule_enable_username:
             username_normalized = _normalize(username)

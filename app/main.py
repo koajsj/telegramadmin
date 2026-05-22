@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from typing import Any
 
 from telegram import (
@@ -12,6 +14,7 @@ from telegram import (
     ChatPermissions,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputFile,
     Update,
 )
 from telegram.constants import ChatMemberStatus
@@ -107,6 +110,10 @@ async def _reply_text(update: Update, text: str) -> None:
 
 
 def _status_text(user_id: int | None) -> str:
+    learned_snapshot = settings_store.learned_keyword_snapshot(5)
+    learned_summary = "，".join(
+        f"{item['keyword']}({item['hits']})" for item in learned_snapshot
+    ) or "暂无"
     user_line = f"你的 Telegram ID：{user_id}\n" if user_id is not None else ""
     return (
         "后台管理\n"
@@ -118,6 +125,7 @@ def _status_text(user_id: int | None) -> str:
         f"高危关键词：{len(settings.keywords)} 个\n"
         f"学习关键词：{settings_store.learned_keyword_count} 个\n"
         f"忽略词：{len(settings_store.ignored_keywords)} 个\n"
+        f"学习样本：{learned_summary}\n"
         f"自学习：{_flag(settings.learning_enabled)}\n"
         f"刷屏规则：{settings.flood_max_messages} 条 / {settings.flood_window_seconds} 秒\n"
         "规则开关："
@@ -348,6 +356,86 @@ async def admin_toggle_learning(update: Update, context: ContextTypes.DEFAULT_TY
     await _reply_text(update, f"自学习功能已{_flag(new_value)}。")
 
 
+async def admin_export_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_admin(update, context):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    payload = settings_store.export_keywords_payload()
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    buffer = BytesIO(data)
+    buffer.name = "telegram-keywords-export.json"
+    await message.reply_document(
+        document=InputFile(buffer, filename=buffer.name),
+        caption="词库导出文件。",
+    )
+
+
+def _parse_import_payload(text: str) -> dict[str, Any]:
+    stripped = text.strip()
+    if not stripped:
+        return {}
+    if stripped.startswith("{"):
+        data = json.loads(stripped)
+        if not isinstance(data, dict):
+            raise ValueError("JSON 词库必须是对象")
+        return data
+    lines = [
+        line.strip()
+        for line in stripped.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    return {"custom_keywords": lines}
+
+
+async def admin_import_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_private_admin(update, context):
+        return
+
+    message = update.effective_message
+    if message is None:
+        return
+
+    payload_text = ""
+    document = message.document
+    if document is None and message.reply_to_message is not None:
+        document = message.reply_to_message.document
+
+    try:
+        if document is not None:
+            file = await context.bot.get_file(document.file_id)
+            payload_text = (await file.download_as_bytearray()).decode("utf-8")
+        elif context.args:
+            payload_text = " ".join(context.args)
+        elif message.reply_to_message is not None and message.reply_to_message.text:
+            payload_text = message.reply_to_message.text
+    except UnicodeDecodeError as exc:
+        await _reply_text(update, f"导入失败：词库文件必须是 UTF-8 文本。{exc}")
+        return
+
+    if not payload_text.strip():
+        await _reply_text(update, "用法：/importkeywords 后附 JSON 文本、纯文本列表，或上传词库文件后回复该命令。")
+        return
+
+    try:
+        payload = _parse_import_payload(payload_text)
+        imported = settings_store.import_keywords_payload(payload)
+    except (ValueError, json.JSONDecodeError) as exc:
+        await _reply_text(update, f"导入失败：{exc}")
+        return
+
+    await _reply_text(
+        update,
+        "导入完成："
+        f"自定义 {imported['custom']}，"
+        f"学习词 {imported['learned']}，"
+        f"忽略词 {imported['ignored']}。",
+    )
+
+
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -533,6 +621,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     result = rule_engine.evaluate(text, chat.id, user.id, username=user.username)
+    learned_terms = learner.observe(text, user.id, is_spam=result.is_spam, score=result.score)
     if not result.is_spam:
         return
 
@@ -542,10 +631,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await _apply_action(update, context, result.score)
     await _apply_strike_ban(update, context, result.score)
-
-    learned_terms: list[str] = []
-    if settings.learning_enabled:
-        learned_terms = learner.observe(text, user.id)
 
     await _log_moderation(update, context, result.reasons, result.score, text, learned_terms)
 
@@ -574,6 +659,8 @@ async def post_init(application: Application) -> None:
         BotCommand("addkeyword", "添加自定义关键词"),
         BotCommand("delkeyword", "删除自定义关键词"),
         BotCommand("learn", "切换自学习功能"),
+        BotCommand("exportkeywords", "导出自定义和学习词库"),
+        BotCommand("importkeywords", "导入词库 JSON 或文本"),
     ]
     await application.bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
 
@@ -595,6 +682,8 @@ def main() -> None:
     application.add_handler(CommandHandler("addkeyword", admin_add_keyword))
     application.add_handler(CommandHandler("delkeyword", admin_del_keyword))
     application.add_handler(CommandHandler(["learn", "togglelearning"], admin_toggle_learning))
+    application.add_handler(CommandHandler("exportkeywords", admin_export_keywords))
+    application.add_handler(CommandHandler("importkeywords", admin_import_keywords))
     application.add_handler(CallbackQueryHandler(admin_callback))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)

@@ -1,27 +1,25 @@
 # Telegram 群管理机器人
 
-一个面向 Telegram 群组的自动化管理机器人。它会根据链接、关键词、用户名、刷屏、重复消息和超长消息等规则删除垃圾消息，并按配置禁言或封禁发送者。管理员可在机器人私聊里使用中文按钮面板调整规则。
+这是一个面向 Telegram 群组的自动管理机器人。它会把链接、关键词、学习词、用户名、刷屏、重复消息、超长消息和结构化引流特征合并为风险分，再按分数决定观察、删除、禁言或封禁，尽量降低单个宽泛词造成的误伤。
 
 ## 功能
 
-- 自动删除命中规则的群消息
-- 支持禁言、封禁、累计违规后封禁
-- 支持链接、关键词、用户名、刷屏、重复消息、超长消息检测
-- 支持从 `data/*.txt` 和自定义文件自动加载词库
-- 支持私聊后台：规则开关、动作切换、禁言时长、刷屏阈值、词库重载
-- 支持 `/addkeyword` 和 `/delkeyword` 动态维护自定义关键词
-- 支持自学习：多个用户多次触发的可疑新词会加入自定义关键词
-- 支持同步群管理员，避免误处理群管理员消息
-- 支持可选日志群，记录已处理消息的原因和预览
+- 分数化处罚：低风险消息先不过度处罚，高分消息才禁言或封禁
+- 高危词与学习词分层：新词先进入低权重学习池，再按阈值自动升级
+- 自学习自愈：学习词在干净上下文反复出现后会自动沉入忽略词
+- 自动白名单：常见正常词在多用户清洁样本中会自动进入忽略词
+- 绕过识别：会归一化零宽字符、全角字符、空格和符号插入
+- 结构特征：识别联系方式、收益诱导、拉群、博彩、成人引流等组合信号
+- 词库管理：支持 `.txt` 词库、自定义词、学习词、忽略词导入导出
+- 私聊后台：规则开关、处罚动作、刷屏阈值、禁言时长和学习状态可查看
+- 管理员保护：同步群管理员，避免误处理管理消息
+- 可选日志群：记录已处理消息的原因、分数和摘要
 
 ## 快速部署
 
 1. 在 BotFather 创建机器人并取得 `BOT_TOKEN`。
 2. 把机器人拉进目标群。
-3. 给机器人至少授予以下权限：
-   - 删除消息
-   - 封禁用户
-   - 限制用户发送消息
+3. 给机器人授予删除消息、封禁用户、限制发言权限。
 4. 在 Debian 服务器执行：
 
 ```bash
@@ -30,51 +28,39 @@ cd telegram-moderation-bot
 sudo bash setup_debian.sh
 ```
 
-脚本会创建项目内 `.venv`、安装依赖、写入 `.env`、创建并启动 `tgadmin.service`。脚本只会要求输入一次 `BOT_TOKEN`。
-
-依赖中包含 `python-telegram-bot[job-queue]`，用于定时同步群管理员列表。
+脚本会创建项目内 `.venv`、安装依赖、写入 `.env`、创建并启动 `tgadmin.service`。
 
 ## 本地运行
+
+Windows：
 
 ```bash
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements.txt
-copy .env.example .env
-```
-
-编辑 `.env` 填入 `BOT_TOKEN` 后运行：
-
-```bash
 .venv\Scripts\python main.py
 ```
 
-Linux 或 Debian 上使用：
+第一次运行会提示输入 `Telegram bot token`，并自动生成 `.env`。
+
+Linux：
 
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
-cp .env.example .env
 .venv/bin/python main.py
 ```
 
-## 管理面板
+第一次运行会提示输入 `Telegram bot token`，并自动生成 `.env`。
 
-在群里让机器人看到至少一条消息后，私聊机器人发送：
+## 管理入口
+
+先让机器人在群里看到一条消息，再私聊它：
 
 ```text
 /admin
 ```
 
-如果还没有设置机器人主人，第一位已同步的群管理员打开后台时会自动成为主人。后续主人拥有最高权限。
-
-后台按钮支持：
-
-- 开关链接检测、关键词过滤、用户名过滤、刷屏拦截、重复消息、超长消息、自学习
-- 在禁言和封禁之间切换处理动作
-- 快速设置刷屏阈值
-- 快速设置禁言时长
-- 重新载入词库
-- 刷新当前状态
+若还没有机器人主人，第一位已同步的群管理员打开后台时会自动成为主人。
 
 常用命令：
 
@@ -83,38 +69,52 @@ cp .env.example .env
 /reloadkeywords
 /action mute
 /action ban
-/mute 3600
 /mute 2h
 /flood 6 10
 /addkeyword 关键词
 /delkeyword 关键词
 /learn
+/exportkeywords
+/importkeywords
 ```
+
+`/status` 会显示风险阈值、学习词数量、忽略词数量和当前高频学习样本。`/exportkeywords` 会导出自定义词、学习词和忽略词 JSON；`/importkeywords` 支持 JSON、纯文本词表，或回复一个上传的词库文件导入。
+
+## 学习机制
+
+机器人只会从已触发风险的消息中学习可疑新词。新词需要达到多次命中和多用户阈值后才进入低权重学习池；学习词仍然需要和其它风险信号叠加才更容易触发处罚。
+
+学习词会自动收敛：
+
+- 长期不再出现会退休
+- 在干净消息里多次出现会自动降到忽略词
+- 常见正常词在多用户清洁样本中会自动进入忽略词
+- 达到更高命中阈值后才会升级到高危自定义词
+
+这样可以减少人工维护，也能避免自学习把普通聊天词直接写进高危词库。
 
 ## 词库
 
-默认会自动加载：
+默认自动加载：
 
 - `data/keywords.txt`
-- `data/` 目录下的所有 `.txt`
-- 项目根目录下的所有 `.txt`，但会跳过 `requirements.txt`
+- `data/` 下的所有 `.txt`
+- 项目根目录下的所有 `.txt`，但跳过 `requirements.txt`
 
-每行一个关键词，空行和以 `#` 开头的行会被忽略。修改词库后，发送 `/reloadkeywords` 或重启服务生效。
+每行一个关键词；空行和以 `#` 开头的行会被忽略。修改文件词库后，发送 `/reloadkeywords` 或重启服务生效。
 
-内置词库文件包括：
+运行时状态保存在 `data/state.json`，包括：
 
-- `data/博彩赌博.txt`
-- `data/广告类型.txt`
-- `data/成人内容.txt`
-- `data/色情类型.txt`
-- `data/色情词库.txt`
-- `data/诈骗广告.txt`
+- 自定义高危词
+- 学习词及命中统计
+- 自动忽略词
+- 机器人主人 ID
 
-自定义关键词通过 `/addkeyword` 添加，保存在 `data/state.json`。该文件是运行时状态，不建议提交到 Git。
+该文件已被 `.gitignore` 排除。
 
 ## 配置
 
-复制 `.env.example` 为 `.env` 后按需修改：
+多数场景只需要首次运行时输入一次 token。需要精细调参时再编辑 `.env`：
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
@@ -133,6 +133,8 @@ LEARNING_MIN_HITS=3
 LEARNING_MIN_UNIQUE_USERS=2
 LEARNING_PROMOTE_HITS=6
 LEARNING_PROMOTE_UNIQUE_USERS=3
+LEARNING_IGNORE_HITS=4
+LEARNING_IGNORE_UNIQUE_USERS=2
 LEARNING_RETIRE_SECONDS=2592000
 LEARNING_WINDOW_SECONDS=86400
 DELETE_SCORE_THRESHOLD=20
@@ -145,9 +147,11 @@ USERNAME_SCORE=20
 LENGTH_SCORE=15
 FLOOD_SCORE=35
 REPEAT_SCORE=25
+STRUCTURE_SCORE=12
 COMBO_LINK_KEYWORD_BONUS=15
 COMBO_USERNAME_KEYWORD_BONUS=10
 COMBO_FLOOD_REPEAT_BONUS=10
+COMBO_STRUCTURE_LINK_BONUS=12
 RULE_ENABLE_LINK=true
 RULE_ENABLE_KEYWORDS=true
 RULE_ENABLE_USERNAME=true
@@ -161,45 +165,26 @@ REPEAT_MAX_DUPES=2
 REPEAT_WINDOW_SECONDS=60
 ```
 
-关键配置说明：
+关键配置：
 
-- `ACTION`：违规后的动作，支持 `mute` 或 `ban`
-- `MUTE_DURATION_SECONDS`：禁言秒数，设置为 `0` 时只删除消息
-- `BAN_AFTER_STRIKES`：同一用户累计违规多少次后封禁，`0` 表示关闭
-- `LOG_CHAT_ID`：可选日志群或日志频道 ID
-- `KEYWORDS`：逗号分隔的内联关键词
-- `KEYWORDS_FILE`：主词库文件
-- `KEYWORDS_FILES`：逗号分隔的额外词库文件
-- `AUTO_LOAD_TXT`：是否自动加载 `data/` 和项目根目录下的 `.txt`
-- `LEARNING_MIN_HITS`：候选词出现次数阈值
-- `LEARNING_MIN_UNIQUE_USERS`：候选词不同发送者数量阈值
-- `LEARNING_PROMOTE_HITS`：候选词升级为高危词前的更高阈值
-- `LEARNING_RETIRE_SECONDS`：学习词长期不再出现时自动退休的时间
 - `DELETE_SCORE_THRESHOLD`：达到这个分数才删除消息
 - `MUTE_SCORE_THRESHOLD`：达到这个分数才禁言
 - `BAN_SCORE_THRESHOLD`：达到这个分数直接封禁
+- `LEARNING_MIN_*`：进入学习池前的可疑样本阈值
+- `LEARNING_PROMOTE_*`：学习词升级为高危词前的阈值
+- `LEARNING_IGNORE_*`：自动忽略正常词的阈值
+- `LEARNING_RETIRE_SECONDS`：学习词长期不再出现后的退休时间
+- `STRUCTURE_SCORE`：结构化引流特征的基础分
 
 ## 运维
 
-查看服务状态：
-
 ```bash
 sudo systemctl status tgadmin --no-pager
-```
-
-查看实时日志：
-
-```bash
 sudo journalctl -u tgadmin -f
-```
-
-重启服务：
-
-```bash
 sudo systemctl restart tgadmin
 ```
 
-更新代码后重新安装依赖并重启：
+更新代码后：
 
 ```bash
 git pull
@@ -213,4 +198,4 @@ sudo systemctl restart tgadmin
 python -m unittest discover -s tests -v
 ```
 
-当前测试覆盖规则判断和自学习关键词晋升，适合作为修改规则逻辑后的快速烟雾验证。
+当前测试覆盖自学习、自动忽略、风险评分、结构特征和绕过归一化。

@@ -57,6 +57,7 @@ class AdaptiveKeywordLearner:
     def __init__(self, store: SettingsStore) -> None:
         self._store = store
         self._candidates: dict[str, CandidateState] = defaultdict(CandidateState)
+        self._benign_candidates: dict[str, CandidateState] = defaultdict(CandidateState)
 
     def _should_skip(self, token: str) -> bool:
         if not token:
@@ -77,7 +78,7 @@ class AdaptiveKeywordLearner:
             return True
         return False
 
-    def observe(self, text: str, user_id: int) -> list[str]:
+    def observe(self, text: str, user_id: int, *, is_spam: bool, score: int) -> list[str]:
         if not self._store.settings.learning_enabled:
             return []
 
@@ -93,18 +94,28 @@ class AdaptiveKeywordLearner:
                 continue
 
             if candidate in self._store.settings.learned_keywords:
-                self._store.touch_learned_keyword(candidate, now)
+                self._store.record_learned_feedback(candidate, is_spam, now)
                 continue
 
-            state = self._candidates[candidate]
-            hits, unique_users = state.add(now, user_id, window)
-            if hits < min_hits or unique_users < min_unique_users:
-                continue
+            if is_spam and score >= self._store.settings.delete_score_threshold:
+                state = self._candidates[candidate]
+                hits, unique_users = state.add(now, user_id, window)
+                if hits < min_hits or unique_users < min_unique_users:
+                    continue
 
-            result = self._store.add_learned_keyword(candidate, hits, unique_users, now)
-            promoted.append(candidate)
-            self._candidates.pop(candidate, None)
-            if result == "promoted":
-                continue
+                result = self._store.add_learned_keyword(candidate, hits, unique_users, now)
+                promoted.append(candidate)
+                self._candidates.pop(candidate, None)
+                if result == "promoted":
+                    continue
+            else:
+                benign_state = self._benign_candidates[candidate]
+                benign_hits, benign_unique_users = benign_state.add(now, user_id, window)
+                if (
+                    benign_hits >= self._store.settings.learning_ignore_hits
+                    and benign_unique_users >= self._store.settings.learning_ignore_unique_users
+                ):
+                    self._store.ignore_keyword(candidate)
+                    self._benign_candidates.pop(candidate, None)
 
         return promoted
