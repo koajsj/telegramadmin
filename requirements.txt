@@ -1,2 +1,6 @@
-python-telegram-bot[job-queue]==21.6
+aiogram==3.22.0
+sqlalchemy==2.0.44
+alembic==1.16.5
+asyncpg==0.30.0
+redis[hiredis]==6.4.0
 python-dotenv==1.0.1

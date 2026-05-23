@@ -2,4 +2,4 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "${ROOT_DIR}/scripts/setup_debian.sh" "$@"
+exec bash "${ROOT_DIR}/scripts/update_debian.sh" "$@"

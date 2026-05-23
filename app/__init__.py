@@ -1,1 +1,0 @@
-"""Telegram moderation bot package."""
