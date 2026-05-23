@@ -29,6 +29,21 @@ generate_secret() {
   date +%s%N | sha256sum | awk '{print $1}'
 }
 
+read_existing_env_value() {
+  local key="$1"
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    echo ""
+    return
+  fi
+  local line
+  line="$(grep -E "^${key}=" "${ENV_FILE}" | tail -n 1 || true)"
+  if [[ -z "${line}" ]]; then
+    echo ""
+    return
+  fi
+  echo "${line#*=}"
+}
+
 install_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     apt-get update
@@ -56,10 +71,26 @@ prepare_env() {
     cp "${ENV_EXAMPLE_FILE}" "${ENV_FILE}"
   fi
 
+  local owner_ids
+  owner_ids="${BOT_OWNER_IDS:-}"
+  if [[ -z "${owner_ids}" ]]; then
+    owner_ids="$(read_existing_env_value "BOT_OWNER_IDS")"
+  fi
+
+  local postgres_password
+  postgres_password="${POSTGRES_PASSWORD:-}"
+  if [[ -z "${postgres_password}" ]]; then
+    postgres_password="$(read_existing_env_value "POSTGRES_PASSWORD")"
+  fi
+  if [[ -z "${postgres_password}" ]]; then
+    postgres_password="$(generate_secret)"
+  fi
+
   set_env "BOT_TOKEN" "${token}"
-  set_env "BOT_OWNER_IDS" "${BOT_OWNER_IDS:-}"
-  set_env "ADMIN_IDS" "${BOT_OWNER_IDS:-}"
-  set_env "DATABASE_URL" "postgresql+asyncpg://postgres:postgres@postgres:5432/tgadmin"
+  set_env "BOT_OWNER_IDS" "${owner_ids}"
+  set_env "ADMIN_IDS" "${owner_ids}"
+  set_env "POSTGRES_PASSWORD" "${postgres_password}"
+  set_env "DATABASE_URL" "postgresql+asyncpg://postgres:${postgres_password}@postgres:5432/tgadmin"
   set_env "REDIS_URL" "redis://redis:6379/0"
   set_env "LOG_LEVEL" "INFO"
   set_env "ENVIRONMENT" "production"

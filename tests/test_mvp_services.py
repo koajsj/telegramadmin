@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 import unittest
 
+from bot.database.models import VerificationSession
 from bot.services.moderation import decide_escalation
 from bot.services.onboarding import is_under_watch, newcomer_violation_reason
 from bot.services.rule_engine import evaluate_message
@@ -40,6 +41,9 @@ class FakeMessage:
 
 
 class MvpServiceTests(unittest.IsolatedAsyncioTestCase):
+    def test_verification_session_has_created_at(self) -> None:
+        self.assertTrue(hasattr(VerificationSession, "created_at"))
+
     def test_escalation_steps(self) -> None:
         step1 = decide_escalation(1, 10, 24)
         step3 = decide_escalation(3, 10, 24)

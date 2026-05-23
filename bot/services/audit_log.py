@@ -1,7 +1,12 @@
-﻿from __future__ import annotations
+from __future__ import annotations
+
+import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_action_text(action: str, duration_seconds: int | None) -> str:
@@ -10,9 +15,9 @@ def build_action_text(action: str, duration_seconds: int | None) -> str:
     return action
 
 
-async def send_log(bot: Bot, log_chat_id: int | None, chat_id: int, user_id: int, reason: str, score: int, action: str, excerpt: str) -> None:
+async def send_log(bot: Bot, log_chat_id: int | None, chat_id: int, user_id: int, reason: str, score: int, action: str, excerpt: str) -> bool:
     if log_chat_id is None:
-        return
+        return False
     text = (
         "#moderation\n"
         f"chat_id={chat_id}\n"
@@ -24,5 +29,16 @@ async def send_log(bot: Bot, log_chat_id: int | None, chat_id: int, user_id: int
     )
     try:
         await bot.send_message(chat_id=log_chat_id, text=text)
+        return True
     except (TelegramBadRequest, TelegramForbiddenError):
-        return
+        logger.warning(
+            "failed_to_send_moderation_log",
+            extra={
+                "chat_id": chat_id,
+                "log_chat_id": log_chat_id,
+                "user_id": user_id,
+                "reason": reason,
+                "action": action,
+            },
+        )
+        return False

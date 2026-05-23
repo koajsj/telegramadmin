@@ -96,11 +96,40 @@ def _read_log_level(default: str) -> str:
 
 def load_settings() -> Settings:
     log_chat_raw = _read_optional_text("DEFAULT_LOG_CHAT_ID")
-    default_log_chat_id = int(log_chat_raw) if log_chat_raw is not None else None
+    if log_chat_raw is None:
+        default_log_chat_id = None
+    else:
+        try:
+            default_log_chat_id = int(log_chat_raw)
+        except ValueError as exc:
+            raise SettingsError(f"Invalid integer for DEFAULT_LOG_CHAT_ID: {log_chat_raw}") from exc
 
     owner_ids = _read_id_list("BOT_OWNER_IDS")
     if len(owner_ids) == 0:
         owner_ids = _read_id_list("ADMIN_IDS")
+
+    newcomer_watch_seconds = _read_int("NEWCOMER_WATCH_SECONDS", 86400)
+    flood_window_seconds = _read_int("FLOOD_WINDOW_SECONDS", 10)
+    flood_max_messages = _read_int("FLOOD_MAX_MESSAGES", 5)
+    mute_minutes_step3 = _read_int("MUTE_MINUTES_STEP3", 10)
+    mute_hours_step4 = _read_int("MUTE_HOURS_STEP4", 24)
+    keyword_refresh_seconds = _read_int("KEYWORD_REFRESH_SECONDS", 60)
+    group_admin_max_mute_seconds = _read_int("GROUP_ADMIN_MAX_MUTE_SECONDS", 3600)
+
+    if newcomer_watch_seconds < 0:
+        raise SettingsError("NEWCOMER_WATCH_SECONDS must be >= 0")
+    if flood_window_seconds <= 0:
+        raise SettingsError("FLOOD_WINDOW_SECONDS must be > 0")
+    if flood_max_messages <= 0:
+        raise SettingsError("FLOOD_MAX_MESSAGES must be > 0")
+    if mute_minutes_step3 <= 0:
+        raise SettingsError("MUTE_MINUTES_STEP3 must be > 0")
+    if mute_hours_step4 <= 0:
+        raise SettingsError("MUTE_HOURS_STEP4 must be > 0")
+    if keyword_refresh_seconds <= 0:
+        raise SettingsError("KEYWORD_REFRESH_SECONDS must be > 0")
+    if group_admin_max_mute_seconds <= 0:
+        raise SettingsError("GROUP_ADMIN_MAX_MUTE_SECONDS must be > 0")
 
     return Settings(
         bot_token=_read_text("BOT_TOKEN"),
@@ -112,14 +141,14 @@ def load_settings() -> Settings:
         environment=os.getenv("ENVIRONMENT", "development").strip().lower() or "development",
         webhook_url=_read_optional_text("WEBHOOK_URL"),
         webhook_secret=_read_optional_text("WEBHOOK_SECRET"),
-        newcomer_watch_seconds=_read_int("NEWCOMER_WATCH_SECONDS", 86400),
+        newcomer_watch_seconds=newcomer_watch_seconds,
         newcomer_allow_links=_read_bool("NEWCOMER_ALLOW_LINKS", False),
         newcomer_allow_media=_read_bool("NEWCOMER_ALLOW_MEDIA", False),
-        flood_window_seconds=_read_int("FLOOD_WINDOW_SECONDS", 10),
-        flood_max_messages=_read_int("FLOOD_MAX_MESSAGES", 5),
-        mute_minutes_step3=_read_int("MUTE_MINUTES_STEP3", 10),
-        mute_hours_step4=_read_int("MUTE_HOURS_STEP4", 24),
+        flood_window_seconds=flood_window_seconds,
+        flood_max_messages=flood_max_messages,
+        mute_minutes_step3=mute_minutes_step3,
+        mute_hours_step4=mute_hours_step4,
         auto_init_schema=_read_bool("AUTO_INIT_SCHEMA", False),
-        keyword_refresh_seconds=_read_int("KEYWORD_REFRESH_SECONDS", 60),
-        group_admin_max_mute_seconds=_read_int("GROUP_ADMIN_MAX_MUTE_SECONDS", 3600),
+        keyword_refresh_seconds=keyword_refresh_seconds,
+        group_admin_max_mute_seconds=group_admin_max_mute_seconds,
     )

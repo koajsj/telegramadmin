@@ -3,6 +3,7 @@
 import re
 
 from aiogram.filters import Command
+from aiogram.enums import ChatType
 from aiogram.types import Message
 from aiogram import Router
 
@@ -58,6 +59,35 @@ async def _target_user(message: Message) -> int | None:
         return reply.from_user.id
     text = message.text or ""
     return _parse_user_id_from_text(text)
+
+
+def _is_group_chat(message: Message) -> bool:
+    chat = message.chat
+    if chat is None:
+        return False
+    return chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+
+
+async def _require_group_chat(message: Message) -> bool:
+    if _is_group_chat(message):
+        return True
+    await message.answer("该命令仅支持在群组中执行。请在目标群内使用。")
+    return False
+
+
+async def _ensure_target_user_exists(
+    app_context: AppContext,
+    user_id: int,
+) -> None:
+    async for session in session_scope(app_context.session_factory):
+        await repositories.ensure_user(
+            session=session,
+            user_id=user_id,
+            username=None,
+            full_name=None,
+            is_bot=False,
+            language_code=None,
+        )
 
 
 async def _authorize_management_command(
@@ -129,6 +159,9 @@ async def help_command(message: Message) -> None:
 @router.message(Command("settings"))
 @router.message(Command("status"))
 async def settings_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     chat = message.chat
     user = message.from_user
     if chat is None or user is None:
@@ -193,10 +226,11 @@ async def reload_keywords_command(message: Message, app_context: AppContext) -> 
         return
 
     keywords = app_context.keyword_store.force_reload()
+    audit_chat_id = chat.id if _is_group_chat(message) else None
     async for session in session_scope(app_context.session_factory):
         await log_management_event(
             session=session,
-            chat_id=chat.id,
+            chat_id=audit_chat_id,
             actor_user_id=user.id,
             target_user_id=None,
             action="cmd_reload_keywords",
@@ -208,6 +242,9 @@ async def reload_keywords_command(message: Message, app_context: AppContext) -> 
 
 @router.message(Command("setlog"))
 async def set_log_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     parts = (message.text or "").split()
     if len(parts) < 2:
         await message.answer("用法: /setlog <log_chat_id>")
@@ -256,6 +293,9 @@ async def set_log_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("warn"))
 async def warn_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     target_user_id = await _target_user(message)
     if target_user_id is None:
         await message.answer("用法: /warn <user_id> 或回复目标消息执行 /warn")
@@ -275,6 +315,7 @@ async def warn_command(message: Message, app_context: AppContext) -> None:
     )
     if decision is None:
         return
+    await _ensure_target_user_exists(app_context, target_user_id)
 
     async for session in session_scope(app_context.session_factory):
         await repositories.create_punishment(
@@ -302,6 +343,9 @@ async def warn_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("mute"))
 async def mute_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     target_user_id = await _target_user(message)
     duration_seconds = _parse_duration_seconds(message.text or "")
     if target_user_id is None or duration_seconds is None:
@@ -322,6 +366,7 @@ async def mute_command(message: Message, app_context: AppContext) -> None:
     )
     if decision is None:
         return
+    await _ensure_target_user_exists(app_context, target_user_id)
 
     try:
         await moderation.mute_user(message.bot, chat.id, target_user_id, duration_seconds)
@@ -365,6 +410,9 @@ async def mute_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("ban"))
 async def ban_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     target_user_id = await _target_user(message)
     if target_user_id is None:
         await message.answer("用法: /ban <user_id> 或回复目标消息 /ban")
@@ -384,6 +432,7 @@ async def ban_command(message: Message, app_context: AppContext) -> None:
     )
     if decision is None:
         return
+    await _ensure_target_user_exists(app_context, target_user_id)
 
     try:
         await moderation.ban_user(message.bot, chat.id, target_user_id)
@@ -427,6 +476,9 @@ async def ban_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("unban"))
 async def unban_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     user_id = _parse_user_id_from_text(message.text or "")
     if user_id is None:
         await message.answer("用法: /unban <user_id>")
@@ -446,6 +498,7 @@ async def unban_command(message: Message, app_context: AppContext) -> None:
     )
     if decision is None:
         return
+    await _ensure_target_user_exists(app_context, user_id)
 
     try:
         await moderation.unban_user(message.bot, chat.id, user_id)
@@ -488,6 +541,9 @@ async def unban_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("history"))
 async def history_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     target_user_id = _parse_user_id_from_text(message.text or "")
     if target_user_id is None:
         await message.answer("用法: /history <user_id>")
@@ -528,6 +584,9 @@ async def history_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("whitelist"))
 async def whitelist_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     target_user_id = _parse_user_id_from_text(message.text or "")
     if target_user_id is None:
         await message.answer("用法: /whitelist <user_id>")
@@ -567,6 +626,9 @@ async def whitelist_command(message: Message, app_context: AppContext) -> None:
 
 @router.message(Command("blacklist"))
 async def blacklist_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+
     parts = (message.text or "").split(maxsplit=2)
     if len(parts) < 2:
         await message.answer("用法: /blacklist <user_id> [reason]")

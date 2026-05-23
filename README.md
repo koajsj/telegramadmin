@@ -167,6 +167,7 @@ cat backup.sql | docker compose exec -T postgres psql -U postgres -d tgadmin
 首次部署时脚本会自动写入：
 
 - `BOT_TOKEN`
+- `POSTGRES_PASSWORD`
 - `BOT_OWNER_IDS`（Owner Telegram ID，逗号分隔）
 - `DATABASE_URL`
 - `REDIS_URL`

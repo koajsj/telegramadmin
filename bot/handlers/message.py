@@ -148,7 +148,25 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 executed_by=None,
             )
             await repositories.increment_violation_stats(session, chat.id, user.id, "ban")
-            await audit_log.send_log(message.bot, chat_model.log_chat_id, chat.id, user.id, "blacklist_user", 100, "ban", text)
+            log_sent = await audit_log.send_log(
+                message.bot,
+                chat_model.log_chat_id,
+                chat.id,
+                user.id,
+                "blacklist_user",
+                100,
+                "ban",
+                text,
+            )
+            if not log_sent:
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="moderation_log_send_failed",
+                    detail_json={"reason": "blacklist_user", "log_chat_id": chat_model.log_chat_id},
+                )
             return
 
         whitelisted = await repositories.is_user_whitelisted(session, chat.id, user.id)
@@ -186,7 +204,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                     action="observe_mode_newcomer_hit",
                     detail_json={"reason": newcomer_reason},
                 )
-                await audit_log.send_log(
+                log_sent = await audit_log.send_log(
                     message.bot,
                     chat_model.log_chat_id,
                     chat.id,
@@ -196,6 +214,15 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                     "observe",
                     text,
                 )
+                if not log_sent:
+                    await repositories.create_audit_log(
+                        session=session,
+                        chat_id=chat.id,
+                        actor_user_id=None,
+                        target_user_id=user.id,
+                        action="moderation_log_send_failed",
+                        detail_json={"reason": newcomer_reason, "log_chat_id": chat_model.log_chat_id},
+                    )
                 return
             await moderation.try_delete_message(message)
             violation = await repositories.create_violation(
@@ -229,7 +256,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 executed_by=None,
             )
             await repositories.increment_violation_stats(session, chat.id, user.id, action)
-            await audit_log.send_log(
+            log_sent = await audit_log.send_log(
                 message.bot,
                 chat_model.log_chat_id,
                 chat.id,
@@ -239,6 +266,15 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 action,
                 text,
             )
+            if not log_sent:
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="moderation_log_send_failed",
+                    detail_json={"reason": newcomer_reason, "log_chat_id": chat_model.log_chat_id},
+                )
             return
 
         hits = await rule_engine.evaluate_message(
@@ -277,7 +313,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 action="observe_mode_hit",
                 detail_json={"score": sum(item.score for item in hits), "reasons": [item.reason for item in hits]},
             )
-            await audit_log.send_log(
+            log_sent = await audit_log.send_log(
                 bot=message.bot,
                 log_chat_id=chat_model.log_chat_id,
                 chat_id=chat.id,
@@ -287,6 +323,15 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 action="observe",
                 excerpt=text,
             )
+            if not log_sent:
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="moderation_log_send_failed",
+                    detail_json={"reason": "observe_mode_hit", "log_chat_id": chat_model.log_chat_id},
+                )
             return
 
         total_score = sum(item.score for item in hits)
@@ -333,7 +378,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
         if action == "warn":
             await message.answer(f"用户 {user.id} 已警告。")
 
-        await audit_log.send_log(
+        log_sent = await audit_log.send_log(
             bot=message.bot,
             log_chat_id=chat_model.log_chat_id,
             chat_id=chat.id,
@@ -343,6 +388,15 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
             action=audit_log.build_action_text(action, decision.duration_seconds),
             excerpt=text,
         )
+        if not log_sent:
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=None,
+                target_user_id=user.id,
+                action="moderation_log_send_failed",
+                detail_json={"reason": reason_text, "log_chat_id": chat_model.log_chat_id},
+            )
 
         if chat_model.log_chat_id is not None:
             try:

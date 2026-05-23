@@ -40,6 +40,18 @@ def _callback_duration(action: str) -> int | None:
     return None
 
 
+async def _ensure_target_user_exists(app_context: AppContext, user_id: int) -> None:
+    async for session in session_scope(app_context.session_factory):
+        await repositories.ensure_user(
+            session=session,
+            user_id=user_id,
+            username=None,
+            full_name=None,
+            is_bot=False,
+            language_code=None,
+        )
+
+
 @router.callback_query(ModerateAction.filter())
 async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateAction, app_context: AppContext) -> None:
     actor = query.from_user
@@ -91,6 +103,7 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
         return
 
     if action == "warn":
+        await _ensure_target_user_exists(app_context, user_id)
         async for session in session_scope(app_context.session_factory):
             await repositories.create_punishment(
                 session=session,
@@ -119,6 +132,7 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
         if duration_seconds is None:
             await query.answer("参数错误", show_alert=True)
             return
+        await _ensure_target_user_exists(app_context, user_id)
         try:
             await moderation.mute_user(query.bot, chat_id, user_id, duration_seconds)
         except moderation.ModerationActionError as exc:
@@ -159,6 +173,7 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
         return
 
     if action == "ban":
+        await _ensure_target_user_exists(app_context, user_id)
         try:
             await moderation.ban_user(query.bot, chat_id, user_id)
         except moderation.ModerationActionError as exc:

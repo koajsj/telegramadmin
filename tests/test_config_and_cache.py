@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from bot.config import load_settings
+from bot.config import SettingsError, load_settings
 from bot.services.keyword_store import KeywordStore
 
 
@@ -23,6 +23,28 @@ class ConfigAndCacheTests(unittest.TestCase):
             settings = load_settings()
         self.assertTrue(settings.auto_init_schema)
         self.assertEqual(settings.keyword_refresh_seconds, 15)
+
+    def test_load_settings_rejects_invalid_default_log_chat_id(self) -> None:
+        env = {
+            "BOT_TOKEN": "token",
+            "DATABASE_URL": "postgresql+asyncpg://u:p@h:5432/db",
+            "REDIS_URL": "redis://localhost:6379/0",
+            "DEFAULT_LOG_CHAT_ID": "abc",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(SettingsError):
+                load_settings()
+
+    def test_load_settings_rejects_invalid_positive_constraints(self) -> None:
+        env = {
+            "BOT_TOKEN": "token",
+            "DATABASE_URL": "postgresql+asyncpg://u:p@h:5432/db",
+            "REDIS_URL": "redis://localhost:6379/0",
+            "FLOOD_WINDOW_SECONDS": "0",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            with self.assertRaises(SettingsError):
+                load_settings()
 
     def test_keyword_store_cache_and_reload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

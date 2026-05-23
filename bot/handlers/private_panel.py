@@ -75,6 +75,18 @@ async def _show_home(message: Message) -> None:
     await message.answer(_panel_home_text(), reply_markup=home_keyboard())
 
 
+def _parse_int_part(parts: list[str], index: int) -> int | None:
+    if len(parts) <= index:
+        return None
+    raw = parts[index].strip()
+    if raw == "":
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 async def _authorize_panel_action(
     query: CallbackQuery,
     app_context: AppContext,
@@ -236,7 +248,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         return
 
     if cmd == "g" and len(parts) >= 3:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         if not await _authorize_panel_action(
             query=query,
             app_context=app_context,
@@ -255,7 +270,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         return
 
     if cmd == "menu" and len(parts) >= 4:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         menu = parts[3]
         if not await _authorize_panel_action(
             query=query,
@@ -363,7 +381,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             return
 
     if cmd == "toggle" and len(parts) >= 4:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         field = parts[3]
         if not await _authorize_panel_action(
             query=query,
@@ -436,7 +457,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         return
 
     if cmd == "stats" and len(parts) >= 3:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         if not await _authorize_panel_action(
             query=query,
             app_context=app_context,
@@ -465,7 +489,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         return
 
     if cmd == "expask" and len(parts) >= 4:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         fmt = parts[3]
         if not await _authorize_panel_action(
             query=query,
@@ -485,7 +512,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         return
 
     if cmd == "expdo" and len(parts) >= 4:
-        chat_id = int(parts[2])
+        chat_id = _parse_int_part(parts, 2)
+        if chat_id is None:
+            await query.answer("参数错误", show_alert=True)
+            return
         fmt = parts[3]
         if not await _authorize_panel_action(
             query=query,

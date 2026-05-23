@@ -37,6 +37,7 @@ sudo bash setup_debian.sh
 - 安装 Docker / Docker Compose（若缺失）
 - 自动创建 `.env`
 - 写入你输入的 `BOT_TOKEN`
+- 自动生成并写入 `POSTGRES_PASSWORD`
 - 预留 `BOT_OWNER_IDS`（Owner 权限用户，按需填写）
 - 自动生成 `WEBHOOK_SECRET`
 - 启动 `postgres`、`redis`、`bot`
