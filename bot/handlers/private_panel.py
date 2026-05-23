@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 import json
+import logging
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
@@ -32,8 +34,11 @@ from bot.utils.permissions import authorize_action, is_owner
 
 
 router = Router(name="private_panel")
+logger = logging.getLogger(__name__)
 GROUPS_PAGE_SIZE = 8
 GROUPS_CACHE_TTL_SECONDS = 90
+REDIS_RETRY_ATTEMPTS = 2
+REDIS_RETRY_DELAY_SECONDS = 0.2
 
 
 def _panel_home_text() -> str:
@@ -77,18 +82,58 @@ def _deserialize_groups(raw: str) -> list[tuple[int, str]] | None:
 
 
 async def _load_cached_groups(app_context: AppContext, user_id: int) -> list[tuple[int, str]] | None:
-    cache_value = await app_context.redis.get(_groups_cache_key(user_id))
+    key = _groups_cache_key(user_id)
+    attempt = 1
+    while True:
+        try:
+            cache_value = await app_context.redis.get(key)
+            break
+        except RedisError:
+            logger.warning(
+                "panel_groups_cache_read_failed",
+                extra={
+                    "user_id": user_id,
+                    "cache_key": key,
+                    "attempt": attempt,
+                    "retry_attempts": REDIS_RETRY_ATTEMPTS,
+                    "sleep_seconds": REDIS_RETRY_DELAY_SECONDS,
+                },
+            )
+            if attempt >= REDIS_RETRY_ATTEMPTS:
+                return None
+            await asyncio.sleep(REDIS_RETRY_DELAY_SECONDS)
+            attempt += 1
     if cache_value is None:
         return None
     return _deserialize_groups(cache_value)
 
 
 async def _store_cached_groups(app_context: AppContext, user_id: int, groups: list[tuple[int, str]]) -> None:
-    await app_context.redis.set(
-        _groups_cache_key(user_id),
-        _serialize_groups(groups),
-        ex=GROUPS_CACHE_TTL_SECONDS,
-    )
+    key = _groups_cache_key(user_id)
+    attempt = 1
+    while True:
+        try:
+            await app_context.redis.set(
+                key,
+                _serialize_groups(groups),
+                ex=GROUPS_CACHE_TTL_SECONDS,
+            )
+            return
+        except RedisError:
+            logger.warning(
+                "panel_groups_cache_write_failed",
+                extra={
+                    "user_id": user_id,
+                    "cache_key": key,
+                    "attempt": attempt,
+                    "retry_attempts": REDIS_RETRY_ATTEMPTS,
+                    "sleep_seconds": REDIS_RETRY_DELAY_SECONDS,
+                },
+            )
+            if attempt >= REDIS_RETRY_ATTEMPTS:
+                return
+            await asyncio.sleep(REDIS_RETRY_DELAY_SECONDS)
+            attempt += 1
 
 
 async def _groups_for_user_uncached(message: Message, app_context: AppContext) -> list[tuple[int, str]]:
