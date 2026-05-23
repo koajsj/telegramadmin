@@ -1,13 +1,16 @@
 ﻿from __future__ import annotations
 
-from aiogram import Router
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import CallbackQuery
+from aiogram import Router
 
 from bot.app_context import AppContext
 from bot.database import repositories
 from bot.database.session import session_scope
+from bot.schemas.permissions import PermissionAction
 from bot.services import moderation
+from bot.services.management_audit import log_management_event
+from bot.utils.permissions import authorize_action
 
 
 router = Router(name="callbacks")
@@ -19,10 +22,53 @@ class ModerateAction(CallbackData, prefix="md"):
     user_id: int
 
 
+CALLBACK_ACTION_MAP: dict[str, PermissionAction] = {
+    "warn": PermissionAction.WARN,
+    "mute10": PermissionAction.MUTE_ANY,
+    "mute60": PermissionAction.MUTE_ANY,
+    "ban": PermissionAction.BAN,
+    "wl": PermissionAction.WHITELIST,
+    "ignore": PermissionAction.WARN,
+}
+
+
+def _callback_duration(action: str) -> int | None:
+    if action == "mute10":
+        return 600
+    if action == "mute60":
+        return 3600
+    return None
+
+
 @router.callback_query(ModerateAction.filter())
 async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateAction, app_context: AppContext) -> None:
     actor = query.from_user
-    if actor.id not in app_context.settings.admin_ids:
+    permission_action = CALLBACK_ACTION_MAP.get(callback_data.action)
+    if permission_action is None:
+        await query.answer("不支持的操作", show_alert=True)
+        return
+
+    duration_seconds = _callback_duration(callback_data.action)
+    decision = await authorize_action(
+        bot=query.bot,
+        settings=app_context.settings,
+        user_id=actor.id,
+        chat_id=callback_data.chat_id,
+        action=permission_action,
+        duration_seconds=duration_seconds,
+    )
+
+    if not decision.allowed:
+        async for session in session_scope(app_context.session_factory):
+            await log_management_event(
+                session=session,
+                chat_id=callback_data.chat_id,
+                actor_user_id=actor.id,
+                target_user_id=callback_data.user_id,
+                action=f"cb_{callback_data.action}",
+                decision=decision,
+                detail_json={"status": "denied", "callback_data": query.data or ""},
+            )
         await query.answer("无权限", show_alert=True)
         return
 
@@ -31,6 +77,16 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
     user_id = callback_data.user_id
 
     if action == "ignore":
+        async for session in session_scope(app_context.session_factory):
+            await log_management_event(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+                action="cb_ignore",
+                decision=decision,
+                detail_json={"status": "success"},
+            )
         await query.answer("已忽略")
         return
 
@@ -47,11 +103,37 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
                 executed_by=actor.id,
             )
             await repositories.increment_violation_stats(session, chat_id, user_id, "warn")
+            await log_management_event(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+                action="cb_warn",
+                decision=decision,
+                detail_json={"status": "success"},
+            )
         await query.answer("已警告")
         return
 
-    if action == "mute10":
-        await moderation.mute_user(query.bot, chat_id, user_id, 600)
+    if action in {"mute10", "mute60"}:
+        if duration_seconds is None:
+            await query.answer("参数错误", show_alert=True)
+            return
+        try:
+            await moderation.mute_user(query.bot, chat_id, user_id, duration_seconds)
+        except moderation.ModerationActionError as exc:
+            async for session in session_scope(app_context.session_factory):
+                await log_management_event(
+                    session=session,
+                    chat_id=chat_id,
+                    actor_user_id=actor.id,
+                    target_user_id=user_id,
+                    action=f"cb_{action}",
+                    decision=decision,
+                    detail_json={"status": "failed", "error": str(exc), "duration_seconds": duration_seconds},
+                )
+            await query.answer(f"执行失败: {exc}", show_alert=True)
+            return
         async for session in session_scope(app_context.session_factory):
             await repositories.create_punishment(
                 session=session,
@@ -59,33 +141,40 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
                 chat_id=chat_id,
                 user_id=user_id,
                 action="mute",
-                duration_seconds=600,
-                reason="inline_mute10",
+                duration_seconds=duration_seconds,
+                reason=f"inline_{action}",
                 executed_by=actor.id,
             )
             await repositories.increment_violation_stats(session, chat_id, user_id, "mute")
-        await query.answer("已禁言10分钟")
-        return
-
-    if action == "mute60":
-        await moderation.mute_user(query.bot, chat_id, user_id, 3600)
-        async for session in session_scope(app_context.session_factory):
-            await repositories.create_punishment(
+            await log_management_event(
                 session=session,
-                violation_id=None,
                 chat_id=chat_id,
-                user_id=user_id,
-                action="mute",
-                duration_seconds=3600,
-                reason="inline_mute60",
-                executed_by=actor.id,
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+                action=f"cb_{action}",
+                decision=decision,
+                detail_json={"status": "success", "duration_seconds": duration_seconds},
             )
-            await repositories.increment_violation_stats(session, chat_id, user_id, "mute")
-        await query.answer("已禁言1小时")
+        await query.answer("已禁言")
         return
 
     if action == "ban":
-        await moderation.ban_user(query.bot, chat_id, user_id)
+        try:
+            await moderation.ban_user(query.bot, chat_id, user_id)
+        except moderation.ModerationActionError as exc:
+            async for session in session_scope(app_context.session_factory):
+                await log_management_event(
+                    session=session,
+                    chat_id=chat_id,
+                    actor_user_id=actor.id,
+                    target_user_id=user_id,
+                    action="cb_ban",
+                    decision=decision,
+                    detail_json={"status": "failed", "error": str(exc)},
+                )
+            await query.answer(f"执行失败: {exc}", show_alert=True)
+            return
+
         async for session in session_scope(app_context.session_factory):
             await repositories.create_punishment(
                 session=session,
@@ -98,12 +187,30 @@ async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateActi
                 executed_by=actor.id,
             )
             await repositories.increment_violation_stats(session, chat_id, user_id, "ban")
+            await log_management_event(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+                action="cb_ban",
+                decision=decision,
+                detail_json={"status": "success"},
+            )
         await query.answer("已封禁")
         return
 
     if action == "wl":
         async for session in session_scope(app_context.session_factory):
             await repositories.add_whitelist_user(session, chat_id, user_id)
+            await log_management_event(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=actor.id,
+                target_user_id=user_id,
+                action="cb_whitelist",
+                decision=decision,
+                detail_json={"status": "success"},
+            )
         await query.answer("已加入白名单")
         return
 

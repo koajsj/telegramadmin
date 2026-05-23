@@ -297,3 +297,125 @@ async def set_newcomer_mode(session: AsyncSession, chat_id: int, enabled: bool, 
     chat.allow_links = allow_links
     chat.allow_media = allow_media
     await session.flush()
+
+
+async def set_chat_switches(
+    session: AsyncSession,
+    chat_id: int,
+    newcomer_restrict_enabled: bool,
+    keyword_filter_enabled: bool,
+    link_filter_enabled: bool,
+    flood_enabled: bool,
+) -> None:
+    chat = await get_chat_settings(session, chat_id)
+    if chat is None:
+        raise ValueError(f"chat not found: {chat_id}")
+    chat.newcomer_restrict_enabled = newcomer_restrict_enabled
+    chat.keyword_filter_enabled = keyword_filter_enabled
+    chat.link_filter_enabled = link_filter_enabled
+    chat.flood_enabled = flood_enabled
+    await session.flush()
+
+
+def get_chat_enforcement_mode(chat: Chat) -> str:
+    settings_json = chat.settings_json if isinstance(chat.settings_json, dict) else {}
+    mode = str(settings_json.get("enforcement_mode", "enforce"))
+    if mode not in {"enforce", "observe"}:
+        return "enforce"
+    return mode
+
+
+async def set_chat_enforcement_mode(session: AsyncSession, chat_id: int, mode: str) -> None:
+    if mode not in {"enforce", "observe"}:
+        raise ValueError(f"unsupported mode: {mode}")
+    chat = await get_chat_settings(session, chat_id)
+    if chat is None:
+        raise ValueError(f"chat not found: {chat_id}")
+    settings_json = chat.settings_json if isinstance(chat.settings_json, dict) else {}
+    next_settings = dict(settings_json)
+    next_settings["enforcement_mode"] = mode
+    chat.settings_json = next_settings
+    await session.flush()
+
+
+async def list_chats_for_panel(session: AsyncSession) -> list[Chat]:
+    query: Select[tuple[Chat]] = select(Chat).order_by(Chat.updated_at.desc())
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def count_violations(session: AsyncSession, chat_id: int, since: datetime) -> int:
+    query = select(func.count(Violation.id)).where(and_(Violation.chat_id == chat_id, Violation.created_at >= since))
+    result = await session.execute(query)
+    return int(result.scalar_one())
+
+
+async def count_punishments(session: AsyncSession, chat_id: int, since: datetime) -> int:
+    query = select(func.count(Punishment.id)).where(and_(Punishment.chat_id == chat_id, Punishment.created_at >= since))
+    result = await session.execute(query)
+    return int(result.scalar_one())
+
+
+async def count_members_joined(session: AsyncSession, chat_id: int, since: datetime) -> int:
+    query = select(func.count(ChatMember.id)).where(and_(ChatMember.chat_id == chat_id, ChatMember.joined_at.is_not(None), ChatMember.joined_at >= since))
+    result = await session.execute(query)
+    return int(result.scalar_one())
+
+
+async def count_verification_passed(session: AsyncSession, chat_id: int, since: datetime) -> int:
+    from bot.database.models import VerificationSession
+
+    query = select(func.count(VerificationSession.id)).where(
+        and_(
+            VerificationSession.chat_id == chat_id,
+            VerificationSession.status == "passed",
+            VerificationSession.verified_at.is_not(None),
+            VerificationSession.verified_at >= since,
+        )
+    )
+    result = await session.execute(query)
+    return int(result.scalar_one())
+
+
+async def count_verification_total(session: AsyncSession, chat_id: int, since: datetime) -> int:
+    from bot.database.models import VerificationSession
+
+    query = select(func.count(VerificationSession.id)).where(
+        and_(
+            VerificationSession.chat_id == chat_id,
+            VerificationSession.created_at >= since,
+        )
+    )
+    result = await session.execute(query)
+    return int(result.scalar_one())
+
+
+async def top_active_users(session: AsyncSession, chat_id: int, limit: int) -> list[MessageStat]:
+    query: Select[tuple[MessageStat]] = (
+        select(MessageStat)
+        .where(MessageStat.chat_id == chat_id)
+        .order_by(MessageStat.total_messages.desc())
+        .limit(limit)
+    )
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def list_audit_logs(
+    session: AsyncSession,
+    chat_id: int | None,
+    actor_user_id: int | None,
+    action_prefix: str | None,
+    since: datetime,
+    limit: int,
+) -> list[AuditLog]:
+    query = select(AuditLog).where(AuditLog.created_at >= since)
+    if chat_id is not None:
+        query = query.where(AuditLog.chat_id == chat_id)
+    if actor_user_id is not None:
+        query = query.where(AuditLog.actor_user_id == actor_user_id)
+    if action_prefix is not None and action_prefix != "":
+        query = query.where(AuditLog.action.like(f"{action_prefix}%"))
+    query = query.order_by(AuditLog.created_at.desc()).limit(limit)
+    result = await session.execute(query)
+    return list(result.scalars().all())

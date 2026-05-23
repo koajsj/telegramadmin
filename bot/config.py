@@ -21,7 +21,7 @@ class Settings:
     database_url: str
     redis_url: str
     log_level: str
-    admin_ids: tuple[int, ...]
+    owner_ids: tuple[int, ...]
     default_log_chat_id: int | None
     environment: str
     webhook_url: str | None
@@ -33,6 +33,9 @@ class Settings:
     flood_max_messages: int
     mute_minutes_step3: int
     mute_hours_step4: int
+    auto_init_schema: bool
+    keyword_refresh_seconds: int
+    group_admin_max_mute_seconds: int
 
 
 def _read_text(key: str) -> str:
@@ -70,7 +73,7 @@ def _read_bool(key: str, fallback: bool) -> bool:
     raise SettingsError(f"Invalid boolean for {key}: {raw}")
 
 
-def _read_admin_ids(key: str) -> tuple[int, ...]:
+def _read_id_list(key: str) -> tuple[int, ...]:
     raw = os.getenv(key, "").strip()
     if raw == "":
         return tuple()
@@ -80,20 +83,31 @@ def _read_admin_ids(key: str) -> tuple[int, ...]:
         try:
             result.append(int(part))
         except ValueError as exc:
-            raise SettingsError(f"Invalid admin id in {key}: {part}") from exc
+            raise SettingsError(f"Invalid id in {key}: {part}") from exc
     return tuple(result)
+
+
+def _read_log_level(default: str) -> str:
+    value = os.getenv("LOG_LEVEL", default).strip().upper()
+    if value == "":
+        return default
+    return value
 
 
 def load_settings() -> Settings:
     log_chat_raw = _read_optional_text("DEFAULT_LOG_CHAT_ID")
     default_log_chat_id = int(log_chat_raw) if log_chat_raw is not None else None
 
+    owner_ids = _read_id_list("BOT_OWNER_IDS")
+    if len(owner_ids) == 0:
+        owner_ids = _read_id_list("ADMIN_IDS")
+
     return Settings(
         bot_token=_read_text("BOT_TOKEN"),
         database_url=_read_text("DATABASE_URL"),
         redis_url=_read_text("REDIS_URL"),
-        log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
-        admin_ids=_read_admin_ids("ADMIN_IDS"),
+        log_level=_read_log_level("INFO"),
+        owner_ids=owner_ids,
         default_log_chat_id=default_log_chat_id,
         environment=os.getenv("ENVIRONMENT", "development").strip().lower() or "development",
         webhook_url=_read_optional_text("WEBHOOK_URL"),
@@ -105,4 +119,7 @@ def load_settings() -> Settings:
         flood_max_messages=_read_int("FLOOD_MAX_MESSAGES", 5),
         mute_minutes_step3=_read_int("MUTE_MINUTES_STEP3", 10),
         mute_hours_step4=_read_int("MUTE_HOURS_STEP4", 24),
+        auto_init_schema=_read_bool("AUTO_INIT_SCHEMA", False),
+        keyword_refresh_seconds=_read_int("KEYWORD_REFRESH_SECONDS", 60),
+        group_admin_max_mute_seconds=_read_int("GROUP_ADMIN_MAX_MUTE_SECONDS", 3600),
     )

@@ -12,7 +12,7 @@ from bot.database import repositories
 from bot.database.session import session_scope
 from bot.keyboards.moderation import build_log_actions
 from bot.services import audit_log, moderation, onboarding, rule_engine
-from bot.services.keywords import load_keywords_from_directory
+from bot.utils.permissions import is_group_admin
 
 
 router = Router(name="messages")
@@ -24,11 +24,7 @@ FLOOD_SCORE = 35
 
 
 async def _is_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
-    except (TelegramBadRequest, TelegramForbiddenError):
-        return False
-    return member.status in {"creator", "administrator"}
+    return await is_group_admin(bot, chat_id, user_id)
 
 
 @router.message(F.new_chat_members)
@@ -76,7 +72,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
     if user is None or chat is None or user.is_bot:
         return
 
-    if user.id in app_context.settings.admin_ids:
+    if user.id in app_context.settings.owner_ids:
         return
 
     if await _is_chat_admin(message.bot, chat.id, user.id):
@@ -86,7 +82,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
     if text == "" and not onboarding.message_has_media(message):
         return
 
-    keywords = load_keywords_from_directory(app_context.keyword_files_dir)
+    keywords = app_context.keyword_store.get_keywords()
 
     async for session in session_scope(app_context.session_factory):
         chat_model = await repositories.ensure_chat(
@@ -111,13 +107,25 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
             joined_at=None,
             is_newcomer=True,
         )
+        enforcement_mode = repositories.get_chat_enforcement_mode(chat_model)
         await repositories.mark_member_first_message(session, member, datetime.now(timezone.utc))
         await repositories.increment_message_stats(session, chat.id, user.id)
 
         blacklisted = await repositories.is_user_blacklisted(session, chat.id, user.id)
         if blacklisted:
             await moderation.try_delete_message(message)
-            await moderation.ban_user(message.bot, chat.id, user.id)
+            try:
+                await moderation.ban_user(message.bot, chat.id, user.id)
+            except moderation.ModerationActionError:
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="blacklist_ban_failed",
+                    detail_json={"reason": "telegram_permission_or_api_error"},
+                )
+                return
             await repositories.create_violation(
                 session=session,
                 chat_id=chat.id,
@@ -158,6 +166,37 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 allow_media=chat_model.allow_media,
             )
         if newcomer_reason is not None:
+            if enforcement_mode == "observe":
+                await repositories.create_violation(
+                    session=session,
+                    chat_id=chat.id,
+                    user_id=user.id,
+                    message_id=message.message_id,
+                    rule_name="newcomer_restriction",
+                    reason="observe_mode:" + newcomer_reason,
+                    content_excerpt=text[:200],
+                    score=45,
+                    rule_id=None,
+                )
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="observe_mode_newcomer_hit",
+                    detail_json={"reason": newcomer_reason},
+                )
+                await audit_log.send_log(
+                    message.bot,
+                    chat_model.log_chat_id,
+                    chat.id,
+                    user.id,
+                    newcomer_reason,
+                    45,
+                    "observe",
+                    text,
+                )
+                return
             await moderation.try_delete_message(message)
             violation = await repositories.create_violation(
                 session=session,
@@ -175,7 +214,10 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
                 mute_minutes_step3=app_context.settings.mute_minutes_step3,
                 mute_hours_step4=app_context.settings.mute_hours_step4,
             )
-            action = await moderation.apply_decision(message.bot, chat.id, user.id, decision)
+            try:
+                action = await moderation.apply_decision(message.bot, chat.id, user.id, decision)
+            except moderation.ModerationActionError:
+                action = "none"
             await repositories.create_punishment(
                 session=session,
                 violation_id=violation.id,
@@ -215,6 +257,38 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
         if len(hits) == 0:
             return
 
+        if enforcement_mode == "observe":
+            await repositories.create_violation(
+                session=session,
+                chat_id=chat.id,
+                user_id=user.id,
+                message_id=message.message_id,
+                rule_name=hits[0].rule_name,
+                reason="observe_mode:" + ",".join(item.reason for item in hits),
+                content_excerpt=text[:200],
+                score=sum(item.score for item in hits),
+                rule_id=None,
+            )
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=None,
+                target_user_id=user.id,
+                action="observe_mode_hit",
+                detail_json={"score": sum(item.score for item in hits), "reasons": [item.reason for item in hits]},
+            )
+            await audit_log.send_log(
+                bot=message.bot,
+                log_chat_id=chat_model.log_chat_id,
+                chat_id=chat.id,
+                user_id=user.id,
+                reason="observe_mode_hit",
+                score=sum(item.score for item in hits),
+                action="observe",
+                excerpt=text,
+            )
+            return
+
         total_score = sum(item.score for item in hits)
         reason_text = ",".join(item.reason for item in hits)
 
@@ -240,7 +314,10 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
             mute_hours_step4=app_context.settings.mute_hours_step4,
         )
 
-        action = await moderation.apply_decision(message.bot, chat.id, user.id, decision)
+        try:
+            action = await moderation.apply_decision(message.bot, chat.id, user.id, decision)
+        except moderation.ModerationActionError:
+            action = "none"
         await repositories.create_punishment(
             session=session,
             violation_id=violation.id,
@@ -268,8 +345,18 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
         )
 
         if chat_model.log_chat_id is not None:
-            await message.bot.send_message(
-                chat_id=chat_model.log_chat_id,
-                text=f"快捷处置: chat={chat.id} user={user.id}",
-                reply_markup=build_log_actions(chat.id, user.id),
-            )
+            try:
+                await message.bot.send_message(
+                    chat_id=chat_model.log_chat_id,
+                    text=f"快捷处置: chat={chat.id} user={user.id}",
+                    reply_markup=build_log_actions(chat.id, user.id),
+                )
+            except (TelegramBadRequest, TelegramForbiddenError):
+                await repositories.create_audit_log(
+                    session=session,
+                    chat_id=chat.id,
+                    actor_user_id=None,
+                    target_user_id=user.id,
+                    action="send_action_panel_failed",
+                    detail_json={"log_chat_id": chat_model.log_chat_id},
+                )

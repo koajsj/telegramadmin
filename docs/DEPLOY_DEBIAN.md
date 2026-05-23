@@ -37,9 +37,11 @@ sudo bash setup_debian.sh
 - 安装 Docker / Docker Compose（若缺失）
 - 自动创建 `.env`
 - 写入你输入的 `BOT_TOKEN`
+- 预留 `BOT_OWNER_IDS`（Owner 权限用户，按需填写）
 - 自动生成 `WEBHOOK_SECRET`
 - 启动 `postgres`、`redis`、`bot`
 - 执行数据库迁移 `alembic upgrade head`
+- PostgreSQL/Redis 仅在 Docker 内网可访问（默认不暴露公网端口）
 
 ### 4) 验证
 

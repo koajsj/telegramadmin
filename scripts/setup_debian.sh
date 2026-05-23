@@ -57,10 +57,15 @@ prepare_env() {
   fi
 
   set_env "BOT_TOKEN" "${token}"
+  set_env "BOT_OWNER_IDS" "${BOT_OWNER_IDS:-}"
+  set_env "ADMIN_IDS" "${BOT_OWNER_IDS:-}"
   set_env "DATABASE_URL" "postgresql+asyncpg://postgres:postgres@postgres:5432/tgadmin"
   set_env "REDIS_URL" "redis://redis:6379/0"
   set_env "LOG_LEVEL" "INFO"
   set_env "ENVIRONMENT" "production"
+  set_env "AUTO_INIT_SCHEMA" "false"
+  set_env "KEYWORD_REFRESH_SECONDS" "60"
+  set_env "GROUP_ADMIN_MAX_MUTE_SECONDS" "3600"
 
   local webhook_secret
   webhook_secret="$(generate_secret)"
