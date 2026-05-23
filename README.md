@@ -99,14 +99,28 @@ git push origin main
 
 > 适用于 Debian VPS。
 
-### 4.1 拉取代码
+### 4.1 前置准备（未安装 Git 时先执行）
+
+```bash
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y git ca-certificates curl
+```
+
+可选：设置时区（避免日志时间不一致）
+
+```bash
+sudo timedatectl set-timezone Asia/Shanghai
+timedatectl
+```
+
+### 4.2 拉取代码
 
 ```bash
 git clone https://github.com/koajsj/tgadmin.git
 cd tgadmin
 ```
 
-### 4.2 一键部署
+### 4.3 一键部署
 
 ```bash
 sudo bash setup_debian.sh
@@ -121,7 +135,7 @@ sudo bash setup_debian.sh
 5. 自动执行 `alembic upgrade head`
 6. 默认不对公网暴露 PostgreSQL/Redis 端口（仅容器内访问）
 
-### 4.3 查看运行状态
+### 4.4 查看运行状态
 
 ```bash
 docker compose ps
