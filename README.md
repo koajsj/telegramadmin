@@ -250,6 +250,47 @@ python -m unittest discover -s tests -v
 
 ---
 
+## 9. 按钮无响应修复与本次命令记录（2026-05-23）
+
+### 9.1 修复内容
+
+- 修复私聊面板部分按钮在“页面内容未变化”场景下的无响应问题。
+- 根因：Telegram 对相同内容执行 `edit_text` 会返回 `message is not modified`，导致回调流程中断。
+- 处理：在 `bot/handlers/private_panel.py` 新增统一安全编辑函数，捕获并识别该错误，改为给出即时提示 `当前页面已是最新`，保证按钮点击始终有反馈。
+- 影响范围：`panel:home`、`panel:groups`、`panel:g:*`、`panel:menu:*`、`panel:toggle:*`、`panel:stats:*`、`panel:expask:*`、`panel:expdo:*` 等私聊面板编辑路径。
+
+### 9.2 本次实际执行命令
+
+```powershell
+# 1) 目录与仓库定位
+Get-ChildItem -Path C:\Users\Administrator\Desktop -Force -ErrorAction SilentlyContinue | Select-Object Name,Mode,LastWriteTime
+Get-ChildItem -Path C:\Users\Administrator\Desktop -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName '.git') } | Select-Object FullName,@{N='LastWrite';E={$_.LastWriteTime}} | Sort-Object LastWrite -Descending | Select-Object -First 20
+
+# 2) 项目文件与按钮回调排查
+Get-ChildItem -Path C:\Users\Administrator\Desktop\admin -Force | Select-Object Name,Mode,LastWriteTime
+Get-Content -Path C:\Users\Administrator\Desktop\admin\README.md -TotalCount 260
+rg -n "callback|button|inline|Keyboard|callback_query|CallbackQuery|on_click|router|command" C:\Users\Administrator\Desktop\admin\bot C:\Users\Administrator\Desktop\admin\main.py C:\Users\Administrator\Desktop\admin\docs -S
+Get-Content C:\Users\Administrator\Desktop\admin\bot\handlers\private_panel.py -TotalCount 360
+Get-Content C:\Users\Administrator\Desktop\admin\bot\handlers\callback.py -TotalCount 360
+Get-Content C:\Users\Administrator\Desktop\admin\bot\keyboards\private_panel.py -TotalCount 260
+(Get-Content C:\Users\Administrator\Desktop\admin\bot\handlers\private_panel.py | Measure-Object -Line).Lines
+Get-Content C:\Users\Administrator\Desktop\admin\bot\handlers\private_panel.py
+
+# 3) 测试验证
+python -m unittest discover -s tests -v   # 失败：系统 python.exe 不可访问
+C:\Users\Administrator\Desktop\admin\.venv\Scripts\python.exe -m unittest discover -s tests -v
+
+# 4) 变更核对
+git -c safe.directory=C:/Users/Administrator/Desktop/admin -C C:/Users/Administrator/Desktop/admin --no-pager diff -- bot/handlers/private_panel.py README.md
+git -c safe.directory=C:/Users/Administrator/Desktop/admin -C C:/Users/Administrator/Desktop/admin status --short --branch
+```
+
+### 9.3 测试结果
+
+- `unittest` 共执行 16 项，全部通过（`OK`）。
+
+---
+
 ## 10. 代码仓库清理约束
 
 - `logs/`、`__pycache__/`、`.venv/`、`*.sqlite3` 已加入 `.gitignore`。

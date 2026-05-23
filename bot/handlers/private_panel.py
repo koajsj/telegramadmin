@@ -5,9 +5,9 @@ from io import BytesIO
 import json
 
 from aiogram import F, Router
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import text
@@ -134,6 +134,27 @@ async def _show_home(message: Message) -> None:
     await message.answer(_panel_home_text(), reply_markup=home_keyboard())
 
 
+def _is_message_not_modified_error(error: TelegramBadRequest) -> bool:
+    return "message is not modified" in str(error).lower()
+
+
+async def _edit_panel_text(
+    query: CallbackQuery,
+    text_value: str,
+    reply_markup: InlineKeyboardMarkup,
+) -> None:
+    if query.message is None:
+        raise RuntimeError("panel callback edit failed: callback message is missing")
+    try:
+        await query.message.edit_text(text_value, reply_markup=reply_markup)
+    except TelegramBadRequest as exc:
+        if _is_message_not_modified_error(exc):
+            await query.answer("当前页面已是最新")
+            return
+        raise
+    await query.answer()
+
+
 def _parse_int_part(parts: list[str], index: int) -> int | None:
     if len(parts) <= index:
         return None
@@ -228,8 +249,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
     cmd = parts[1]
 
     if cmd == "home":
-        await query.message.edit_text(_panel_home_text(), reply_markup=home_keyboard())
-        await query.answer()
+        await _edit_panel_text(query, _panel_home_text(), home_keyboard())
         return
 
     if cmd == "groups":
@@ -242,19 +262,18 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             page = parsed_page
         groups = await _groups_for_user(query.message, app_context)
         if len(groups) == 0:
-            await query.message.edit_text("当前没有可操作群组。", reply_markup=home_keyboard())
-            await query.answer()
+            await _edit_panel_text(query, "当前没有可操作群组。", home_keyboard())
             return
         total_pages = (len(groups) + GROUPS_PAGE_SIZE - 1) // GROUPS_PAGE_SIZE
         if page >= total_pages:
             page = 0
         start = page * GROUPS_PAGE_SIZE
         page_groups = groups[start : start + GROUPS_PAGE_SIZE]
-        await query.message.edit_text(
+        await _edit_panel_text(
+            query,
             f"请选择群组（第 {page + 1}/{total_pages} 页）",
-            reply_markup=groups_keyboard(page_groups, page, total_pages),
+            groups_keyboard(page_groups, page, total_pages),
         )
-        await query.answer()
         return
 
     if cmd == "runtime":
@@ -318,8 +337,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             f"recent_failed_ops_24h={recent_failures}\n"
             f"owner_ids={','.join(str(item) for item in app_context.settings.owner_ids) or '(empty)'}"
         )
-        await query.message.edit_text(runtime_text, reply_markup=home_keyboard())
-        await query.answer()
+        await _edit_panel_text(query, runtime_text, home_keyboard())
         return
 
     if cmd == "g" and len(parts) >= 3:
@@ -337,11 +355,11 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             audit_action="panel_group_open",
         ):
             return
-        await query.message.edit_text(
+        await _edit_panel_text(
+            query,
             f"群组控制台\nchat_id={chat_id}",
-            reply_markup=group_panel_keyboard(chat_id),
+            group_panel_keyboard(chat_id),
         )
-        await query.answer()
         return
 
     if cmd == "menu" and len(parts) >= 4:
@@ -373,9 +391,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                     "普通管理员可查看，开关修改仅 Owner 可执行。\n"
                     f"当前处罚模式: {'观察模式' if mode == 'observe' else '安全模式(执行)'}"
                 )
-                await query.message.edit_text(
+                await _edit_panel_text(
+                    query,
                     text_body,
-                    reply_markup=rules_keyboard(
+                    rules_keyboard(
                         chat_id,
                         chat.newcomer_restrict_enabled,
                         chat.keyword_filter_enabled,
@@ -384,7 +403,6 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                         mode,
                     ),
                 )
-            await query.answer()
             return
 
         if menu == "keywords":
@@ -397,8 +415,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 "/lexicon stats|search|add|del|enable|disable|import|export\n"
                 "提示: Owner 可使用 /reloadkeywords 刷新词库。"
             )
-            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, text_body, back_home_keyboard(chat_id))
             return
 
         if menu == "users":
@@ -410,8 +427,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 "/ban <user_id> (Owner)\n"
                 "说明：所有命令会按分级权限再次校验。"
             )
-            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, text_body, back_home_keyboard(chat_id))
             return
 
         if menu == "lists":
@@ -421,8 +437,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 "/whitelist <user_id> (Owner)\n"
                 "/blacklist <user_id> [reason] (Owner)"
             )
-            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, text_body, back_home_keyboard(chat_id))
             return
 
         if menu == "newcomer":
@@ -438,8 +453,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                     f"允许链接: {chat.allow_links}\n"
                     f"允许媒体: {chat.allow_media}"
                 )
-            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, text_body, back_home_keyboard(chat_id))
             return
 
         if menu == "export":
@@ -453,8 +467,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 audit_action="panel_export_open",
             ):
                 return
-            await query.message.edit_text("审计日志导出（敏感操作）", reply_markup=export_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, "审计日志导出（敏感操作）", export_keyboard(chat_id))
             return
 
         if menu == "learning":
@@ -468,8 +481,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 "/candidate approve <id> observe|enable\n"
                 "/candidate reject <id> <reason>"
             )
-            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
-            await query.answer()
+            await _edit_panel_text(query, text_body, back_home_keyboard(chat_id))
             return
 
     if cmd == "toggle" and len(parts) >= 4:
@@ -541,11 +553,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 },
             )
 
-        await query.message.edit_text(
-            "规则设置已更新",
-            reply_markup=rules_keyboard(chat_id, newcomer, keyword, link, flood, mode),
-        )
-        await query.answer("已更新")
+        await _edit_panel_text(query, "规则设置已更新", rules_keyboard(chat_id, newcomer, keyword, link, flood, mode))
         return
 
     if cmd == "stats" and len(parts) >= 3:
@@ -576,8 +584,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
                 detail_json={"status": "success", "window_days": 7},
             )
 
-        await query.message.edit_text(report, reply_markup=back_home_keyboard(chat_id))
-        await query.answer()
+        await _edit_panel_text(query, report, back_home_keyboard(chat_id))
         return
 
     if cmd == "expask" and len(parts) >= 4:
@@ -596,11 +603,11 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             audit_action="panel_export_confirm_prompt",
         ):
             return
-        await query.message.edit_text(
+        await _edit_panel_text(
+            query,
             f"导出审计日志 ({fmt.upper()}) 是敏感操作，是否继续？",
-            reply_markup=export_confirm_keyboard(chat_id, fmt),
+            export_confirm_keyboard(chat_id, fmt),
         )
-        await query.answer()
         return
 
     if cmd == "expdo" and len(parts) >= 4:
@@ -644,8 +651,7 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         stream = BytesIO(payload)
         document = BufferedInputFile(stream.getvalue(), filename=filename)
         await query.message.answer_document(document=document, caption="审计日志导出")
-        await query.message.edit_text("导出完成", reply_markup=group_panel_keyboard(chat_id))
-        await query.answer()
+        await _edit_panel_text(query, "导出完成", group_panel_keyboard(chat_id))
         return
 
     await query.answer("无效操作", show_alert=True)
