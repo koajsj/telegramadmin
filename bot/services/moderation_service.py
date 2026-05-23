@@ -12,7 +12,7 @@ from bot.database import repositories
 from bot.schemas.lexicon import ModerationAction
 from bot.schemas.lexicon import RiskLevel
 from bot.schemas.moderation import RuleHit
-from bot.services import audit_log, moderation
+from bot.services import audit_log, learning_intelligence, moderation
 
 
 @dataclass(frozen=True)
@@ -190,6 +190,25 @@ async def handle_hits(
                 "score": score,
             },
         )
+        learned_count = await learning_intelligence.observe_from_moderation(
+            session=session,
+            chat_id=chat_id,
+            text=original_text,
+            hits=sorted_hits,
+            action_executed="observe",
+        )
+        await repositories.create_audit_log(
+            session=session,
+            chat_id=chat_id,
+            actor_user_id=None,
+            target_user_id=user_id,
+            action="learning_observation_recorded",
+            detail_json={
+                "mode": "observe",
+                "learned_candidates": learned_count,
+                "violation_id": violation.id,
+            },
+        )
         await audit_log.send_log(
             bot=message.bot,
             log_chat_id=log_chat_id,
@@ -281,6 +300,26 @@ async def handle_hits(
             "action_executed": outcome.action_executed,
             "delete_success": outcome.delete_success,
             "error": outcome.error,
+        },
+    )
+    learned_count = await learning_intelligence.observe_from_moderation(
+        session=session,
+        chat_id=chat_id,
+        text=original_text,
+        hits=sorted_hits,
+        action_executed=outcome.action_executed,
+    )
+    await repositories.create_audit_log(
+        session=session,
+        chat_id=chat_id,
+        actor_user_id=None,
+        target_user_id=user_id,
+        action="learning_observation_recorded",
+        detail_json={
+            "mode": "enforce",
+            "learned_candidates": learned_count,
+            "violation_id": violation.id,
+            "action_executed": outcome.action_executed,
         },
     )
     await audit_log.send_log(

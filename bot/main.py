@@ -14,6 +14,8 @@ from bot.config import load_settings
 from bot.database.session import create_engine, create_redis, create_session_factory, init_schema
 from bot.handlers import ALL_ROUTERS
 from bot.services.keyword_store import KeywordStore
+from bot.tasks.learning_auto_task import run_learning_auto_loop
+from bot.tasks.mute_release_task import run_mute_release_loop
 
 
 def setup_logging(level: str) -> None:
@@ -38,6 +40,9 @@ async def setup_commands(bot: Bot) -> None:
         BotCommand(command="nightmode", description="夜间策略配置（仅Owner）"),
         BotCommand(command="falsepositive", description="误判标记与回滚（仅Owner）"),
         BotCommand(command="fprules", description="高误判规则统计（仅Owner）"),
+        BotCommand(command="learn", description="学习建议扫描/审核（仅Owner）"),
+        BotCommand(command="auditexport", description="导出审计日志（仅Owner）"),
+        BotCommand(command="groupstats", description="群组统计报表（仅Owner）"),
     ]
     group_commands = [
         BotCommand(command="help", description="查看命令与权限说明"),
@@ -47,6 +52,7 @@ async def setup_commands(bot: Bot) -> None:
         BotCommand(command="unban", description="解封用户（仅Owner）"),
         BotCommand(command="history", description="查看处罚历史（管理员）"),
         BotCommand(command="settings", description="查看群规则配置（管理员）"),
+        BotCommand(command="candidate", description="候选词审核（管理员）"),
     ]
     await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
     await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
@@ -82,9 +88,28 @@ async def run_bot() -> None:
     for router in ALL_ROUTERS:
         dispatcher.include_router(router)
 
+    learning_task: asyncio.Task[None] | None = None
+    mute_release_task: asyncio.Task[None] | None = None
+    if settings.learning_auto_scan_enabled:
+        learning_task = asyncio.create_task(run_learning_auto_loop(app_context))
+    if settings.mute_auto_release_enabled:
+        mute_release_task = asyncio.create_task(run_mute_release_loop(bot=bot, app_context=app_context))
+
     try:
         await dispatcher.start_polling(bot, app_context=app_context)
     finally:
+        if learning_task is not None:
+            learning_task.cancel()
+            try:
+                await learning_task
+            except asyncio.CancelledError:
+                pass
+        if mute_release_task is not None:
+            mute_release_task.cancel()
+            try:
+                await mute_release_task
+            except asyncio.CancelledError:
+                pass
         await redis.aclose()
         await engine.dispose()
         await bot.session.close()

@@ -38,6 +38,16 @@ class Settings:
     keyword_refresh_seconds: int
     group_admin_max_mute_seconds: int
     admin_sync_interval_seconds: int
+    learning_auto_scan_enabled: bool
+    learning_auto_scan_interval_seconds: int
+    learning_auto_scan_days: int
+    learning_auto_scan_limit: int
+    learning_auto_promote_min_confidence: int
+    learning_auto_promote_min_evidence: int
+    learning_auto_promote_max_fp_ratio_percent: int
+    mute_auto_release_enabled: bool
+    mute_auto_release_interval_seconds: int
+    mute_auto_release_lookback_days: int
 
 
 def _read_text(key: str) -> str:
@@ -120,6 +130,14 @@ def load_settings() -> Settings:
     keyword_refresh_seconds = _read_int("KEYWORD_REFRESH_SECONDS", 60)
     group_admin_max_mute_seconds = _read_int("GROUP_ADMIN_MAX_MUTE_SECONDS", 3600)
     admin_sync_interval_seconds = _read_int("ADMIN_SYNC_INTERVAL_SECONDS", 86400)
+    learning_auto_scan_interval_seconds = _read_int("LEARNING_AUTO_SCAN_INTERVAL_SECONDS", 900)
+    learning_auto_scan_days = _read_int("LEARNING_AUTO_SCAN_DAYS", 14)
+    learning_auto_scan_limit = _read_int("LEARNING_AUTO_SCAN_LIMIT", 1500)
+    learning_auto_promote_min_confidence = _read_int("LEARNING_AUTO_PROMOTE_MIN_CONFIDENCE", 120)
+    learning_auto_promote_min_evidence = _read_int("LEARNING_AUTO_PROMOTE_MIN_EVIDENCE", 8)
+    learning_auto_promote_max_fp_ratio_percent = _read_int("LEARNING_AUTO_PROMOTE_MAX_FP_RATIO_PERCENT", 30)
+    mute_auto_release_interval_seconds = _read_int("MUTE_AUTO_RELEASE_INTERVAL_SECONDS", 120)
+    mute_auto_release_lookback_days = _read_int("MUTE_AUTO_RELEASE_LOOKBACK_DAYS", 30)
 
     if newcomer_watch_seconds < 0:
         raise SettingsError("NEWCOMER_WATCH_SECONDS must be >= 0")
@@ -137,6 +155,22 @@ def load_settings() -> Settings:
         raise SettingsError("GROUP_ADMIN_MAX_MUTE_SECONDS must be > 0")
     if admin_sync_interval_seconds <= 0:
         raise SettingsError("ADMIN_SYNC_INTERVAL_SECONDS must be > 0")
+    if learning_auto_scan_interval_seconds <= 0:
+        raise SettingsError("LEARNING_AUTO_SCAN_INTERVAL_SECONDS must be > 0")
+    if learning_auto_scan_days <= 0:
+        raise SettingsError("LEARNING_AUTO_SCAN_DAYS must be > 0")
+    if learning_auto_scan_limit <= 0:
+        raise SettingsError("LEARNING_AUTO_SCAN_LIMIT must be > 0")
+    if learning_auto_promote_min_confidence <= 0:
+        raise SettingsError("LEARNING_AUTO_PROMOTE_MIN_CONFIDENCE must be > 0")
+    if learning_auto_promote_min_evidence <= 0:
+        raise SettingsError("LEARNING_AUTO_PROMOTE_MIN_EVIDENCE must be > 0")
+    if learning_auto_promote_max_fp_ratio_percent < 0 or learning_auto_promote_max_fp_ratio_percent > 100:
+        raise SettingsError("LEARNING_AUTO_PROMOTE_MAX_FP_RATIO_PERCENT must be in [0, 100]")
+    if mute_auto_release_interval_seconds <= 0:
+        raise SettingsError("MUTE_AUTO_RELEASE_INTERVAL_SECONDS must be > 0")
+    if mute_auto_release_lookback_days <= 0:
+        raise SettingsError("MUTE_AUTO_RELEASE_LOOKBACK_DAYS must be > 0")
 
     return Settings(
         bot_token=_read_text("BOT_TOKEN"),
@@ -159,4 +193,14 @@ def load_settings() -> Settings:
         keyword_refresh_seconds=keyword_refresh_seconds,
         group_admin_max_mute_seconds=group_admin_max_mute_seconds,
         admin_sync_interval_seconds=admin_sync_interval_seconds,
+        learning_auto_scan_enabled=_read_bool("LEARNING_AUTO_SCAN_ENABLED", True),
+        learning_auto_scan_interval_seconds=learning_auto_scan_interval_seconds,
+        learning_auto_scan_days=learning_auto_scan_days,
+        learning_auto_scan_limit=learning_auto_scan_limit,
+        learning_auto_promote_min_confidence=learning_auto_promote_min_confidence,
+        learning_auto_promote_min_evidence=learning_auto_promote_min_evidence,
+        learning_auto_promote_max_fp_ratio_percent=learning_auto_promote_max_fp_ratio_percent,
+        mute_auto_release_enabled=_read_bool("MUTE_AUTO_RELEASE_ENABLED", True),
+        mute_auto_release_interval_seconds=mute_auto_release_interval_seconds,
+        mute_auto_release_lookback_days=mute_auto_release_lookback_days,
     )

@@ -35,7 +35,7 @@ class DeploySmokeTests(unittest.TestCase):
             )
             if current.returncode != 0:
                 self.fail(f"alembic current failed: {current.stderr}")
-            self.assertIn("20260523_000002", current.stdout)
+            self.assertIn("20260523_000003", current.stdout)
 
 
 if __name__ == "__main__":

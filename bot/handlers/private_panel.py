@@ -457,6 +457,21 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             await query.answer()
             return
 
+        if menu == "learning":
+            text_body = (
+                "学习候选审核\n"
+                "自动学习来源: 历史违规、处罚结果、误判反馈、词库命中。\n"
+                "默认仅进入候选/观察，不会直接强制处罚。\n"
+                "群内命令（管理员可用）:\n"
+                "/candidate list all 20\n"
+                "/candidate scan 30 2000\n"
+                "/candidate approve <id> observe|enable\n"
+                "/candidate reject <id> <reason>"
+            )
+            await query.message.edit_text(text_body, reply_markup=back_home_keyboard(chat_id))
+            await query.answer()
+            return
+
     if cmd == "toggle" and len(parts) >= 4:
         chat_id = _parse_int_part(parts, 2)
         if chat_id is None:
@@ -542,10 +557,10 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
             query=query,
             app_context=app_context,
             chat_id=chat_id,
-            action=PermissionAction.VIEW_HISTORY,
+            action=PermissionAction.GLOBAL_CONFIG,
             duration_seconds=None,
             target_user_id=None,
-            audit_action="panel_stats",
+            audit_action="panel_stats_owner",
         ):
             return
 

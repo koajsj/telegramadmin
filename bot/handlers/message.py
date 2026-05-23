@@ -133,7 +133,7 @@ async def on_group_message(message: Message, app_context: AppContext) -> None:
             except moderation.ModerationActionError as exc:
                 action = "none"
                 error = str(exc)
-            await repositories.create_violation(
+            violation = await repositories.create_violation(
                 session=session,
                 chat_id=chat.id,
                 user_id=user.id,

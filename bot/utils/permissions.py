@@ -86,14 +86,19 @@ def _authorize_by_role(role: ActorRole, settings: Settings, action: PermissionAc
         PermissionAction.WARN,
         PermissionAction.MUTE_SHORT,
         PermissionAction.MUTE_ANY,
+    }:
+        return PermissionDecision(allowed=True, role=role, reason="admin_allowed_group_scope")
+
+    if action in {
         PermissionAction.BAN,
         PermissionAction.UNBAN,
         PermissionAction.WHITELIST,
         PermissionAction.BLACKLIST,
+        PermissionAction.EXPORT_DATA,
+        PermissionAction.SET_LOG,
+        PermissionAction.RELOAD_KEYWORDS,
+        PermissionAction.GLOBAL_CONFIG,
     }:
-        return PermissionDecision(allowed=True, role=role, reason="admin_allowed_group_scope")
-
-    if action in {PermissionAction.EXPORT_DATA, PermissionAction.SET_LOG, PermissionAction.RELOAD_KEYWORDS, PermissionAction.GLOBAL_CONFIG}:
         return PermissionDecision(allowed=False, role=role, reason="owner_only_action")
 
     return PermissionDecision(allowed=False, role=role, reason="unsupported_action")

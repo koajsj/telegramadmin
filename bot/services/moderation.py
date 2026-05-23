@@ -126,6 +126,24 @@ async def mute_user(bot: Bot, chat_id: int, user_id: int, duration_seconds: int)
         raise ModerationActionError(f"failed to mute user chat_id={chat_id} user_id={user_id}: {exc}") from exc
 
 
+async def unmute_user(bot: Bot, chat_id: int, user_id: int) -> None:
+    permissions = ChatPermissions(can_send_messages=True)
+
+    async def _do_unmute() -> None:
+        await bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=permissions)
+
+    try:
+        await call_telegram_with_retry(
+            operation_name="unmute_chat_member",
+            request_context={"chat_id": chat_id, "user_id": user_id},
+            retry_attempts=TELEGRAM_RETRY_ATTEMPTS,
+            retry_delay_seconds=TELEGRAM_RETRY_DELAY_SECONDS,
+            action=_do_unmute,
+        )
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        raise ModerationActionError(f"failed to unmute user chat_id={chat_id} user_id={user_id}: {exc}") from exc
+
+
 async def ban_user(bot: Bot, chat_id: int, user_id: int) -> None:
     async def _do_ban() -> None:
         await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)

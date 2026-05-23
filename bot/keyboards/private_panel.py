@@ -36,8 +36,9 @@ def group_panel_keyboard(chat_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="用户管理（警告/禁言/封禁）", callback_data=f"panel:menu:{chat_id}:users")],
             [InlineKeyboardButton(text="白黑名单（放行/拦截）", callback_data=f"panel:menu:{chat_id}:lists")],
             [InlineKeyboardButton(text="新人限制（观察期配置）", callback_data=f"panel:menu:{chat_id}:newcomer")],
-            [InlineKeyboardButton(text="数据统计（近7天报表）", callback_data=f"panel:stats:{chat_id}")],
-            [InlineKeyboardButton(text="审计导出（CSV/JSON）", callback_data=f"panel:menu:{chat_id}:export")],
+            [InlineKeyboardButton(text="学习候选（扫描/审核）", callback_data=f"panel:menu:{chat_id}:learning")],
+            [InlineKeyboardButton(text="数据统计（仅Owner）", callback_data=f"panel:stats:{chat_id}")],
+            [InlineKeyboardButton(text="审计导出（仅Owner）", callback_data=f"panel:menu:{chat_id}:export")],
             [InlineKeyboardButton(text="返回群列表", callback_data="panel:groups")],
             [InlineKeyboardButton(text="返回首页", callback_data="panel:home")],
         ]

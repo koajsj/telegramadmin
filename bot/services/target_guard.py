@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aiogram import Bot
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.config import Settings
 from bot.database import repositories
@@ -30,7 +30,7 @@ async def ensure_target_action_allowed(
         chat_id=chat_id,
     )
     if target_is_admin and not actor_is_owner:
-        return False, "目标是该群管理员，仅 Bot Owner 可操作"
+        return False, "目标是群主或管理员，仅 Bot Owner 可操作"
 
     async for session in session_scope(session_factory):
         target_whitelisted = await repositories.is_user_whitelisted(session, chat_id, target_user_id)

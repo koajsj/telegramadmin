@@ -193,6 +193,8 @@ def _entry_matches(entry: LexiconEntry, normalized: NormalizedText, domains: lis
 
 def _build_hit_from_entry(snapshot: LexiconSnapshot, entry: LexiconEntry, entry_match: EntryMatch) -> RuleHit:
     action = _resolve_action(snapshot, entry.risk_level, entry.action_override)
+    if entry.observe_only:
+        action = ModerationAction.LOG
     if entry.kind == LexiconKind.WORD and len(entry.normalized_value) <= 2:
         action = ModerationAction.LOG
     return RuleHit(
@@ -234,6 +236,8 @@ def _match_regex_rules(snapshot: LexiconSnapshot, normalized: NormalizedText) ->
             continue
         trigger = matched.group(0)[:80]
         action = _resolve_action(snapshot, rule.risk_level, rule.action_override)
+        if rule.observe_only:
+            action = ModerationAction.LOG
         hits.append(
             RuleHit(
                 rule_name=f"{rule.category}_regex",

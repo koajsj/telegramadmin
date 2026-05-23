@@ -23,6 +23,8 @@ class ConfigAndCacheTests(unittest.TestCase):
             settings = load_settings()
         self.assertTrue(settings.auto_init_schema)
         self.assertEqual(settings.keyword_refresh_seconds, 15)
+        self.assertTrue(settings.learning_auto_scan_enabled)
+        self.assertEqual(settings.learning_auto_scan_interval_seconds, 900)
 
     def test_load_settings_rejects_invalid_default_log_chat_id(self) -> None:
         env = {

@@ -46,6 +46,16 @@ class PermissionTests(unittest.IsolatedAsyncioTestCase):
             keyword_refresh_seconds=60,
             group_admin_max_mute_seconds=3600,
             admin_sync_interval_seconds=86400,
+            learning_auto_scan_enabled=True,
+            learning_auto_scan_interval_seconds=900,
+            learning_auto_scan_days=14,
+            learning_auto_scan_limit=1500,
+            learning_auto_promote_min_confidence=120,
+            learning_auto_promote_min_evidence=8,
+            learning_auto_promote_max_fp_ratio_percent=30,
+            mute_auto_release_enabled=True,
+            mute_auto_release_interval_seconds=120,
+            mute_auto_release_lookback_days=30,
         )
 
     async def test_owner_can_ban(self) -> None:
@@ -55,11 +65,11 @@ class PermissionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.role, ActorRole.OWNER)
 
-    async def test_group_admin_can_ban(self) -> None:
+    async def test_group_admin_cannot_ban(self) -> None:
         bot = FakeBot({(-1001, 2000): "administrator"})
         with patch("bot.utils.permissions._is_admin_granted", return_value=False):
             decision = await authorize_action(bot, self._settings(), None, 2000, -1001, PermissionAction.BAN, None)  # type: ignore[arg-type]
-        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.allowed)
         self.assertEqual(decision.role, ActorRole.ADMIN)
 
     async def test_group_admin_can_short_mute(self) -> None:

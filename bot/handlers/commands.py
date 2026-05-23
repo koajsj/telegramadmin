@@ -2,6 +2,8 @@
 
 from datetime import datetime, timezone
 import re
+from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfoNotFoundError
 
 from aiogram.filters import Command
 from aiogram.enums import ChatType
@@ -11,9 +13,12 @@ from aiogram import Router
 from bot.app_context import AppContext
 from bot.database import repositories
 from bot.database.session import session_scope
+from bot.middlewares.owner_guard import check_private_owner
+from bot.schemas.lexicon import LexiconKind
 from bot.schemas.permissions import PermissionAction, PermissionDecision
-from bot.services import lexicon_admin, moderation
+from bot.services import audit_export, learning_automation, learning_intelligence, learning_review, lexicon_admin, moderation, statistics
 from bot.services.management_audit import log_management_event
+from bot.services.keywords import normalize_domain, normalize_text
 from bot.services.rule_templates import get_template, template_names
 from bot.services.target_guard import ensure_target_action_allowed
 from bot.utils.permissions import authorize_action, is_owner
@@ -156,7 +161,7 @@ async def help_command(message: Message) -> None:
         "/blacklist <user_id> [reason] 加入黑名单（仅Owner）\n"
         "/setlog <log_chat_id> 设置日志群（仅Owner）\n"
         "/reloadkeywords 刷新词库（仅Owner）\n"
-        "私聊 Owner 额外命令: /lexicon /template /nightmode /falsepositive /fprules"
+        "私聊 Owner 额外命令: /lexicon /template /nightmode /falsepositive /fprules /learn /auditexport /groupstats"
     )
     await message.answer(help_text)
 
@@ -715,15 +720,26 @@ def _parse_command_parts(text: str) -> list[str]:
     return [item.strip() for item in text.strip().split() if item.strip() != ""]
 
 
+def _parse_positive_int(raw: str) -> int | None:
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
 async def _require_private_owner(message: Message, app_context: AppContext) -> bool:
     chat = message.chat
     user = message.from_user
     if chat is None or user is None:
         return False
-    if chat.type != "private":
+    allowed, reason = check_private_owner(chat.type, user.id, app_context.settings.owner_ids)
+    if not allowed and reason == "private_only":
         await message.answer("该命令仅支持私聊控制台。")
         return False
-    if not is_owner(app_context.settings, user.id):
+    if not allowed and reason == "owner_only":
         await message.answer("无权限。")
         return False
     return True
@@ -732,6 +748,9 @@ async def _require_private_owner(message: Message, app_context: AppContext) -> b
 @router.message(Command("lexicon"))
 async def lexicon_command(message: Message, app_context: AppContext) -> None:
     if not await _require_private_owner(message, app_context):
+        return
+    actor = message.from_user
+    if actor is None:
         return
 
     parts = _parse_command_parts(message.text or "")
@@ -796,6 +815,15 @@ async def lexicon_command(message: Message, app_context: AppContext) -> None:
             mute_seconds_override=None,
         )
         app_context.keyword_store.force_reload()
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="lexicon_rule_adjusted",
+                detail_json={"operation": "add", "entry_id": entry_id, "kind": kind, "category": category, "risk": risk},
+            )
         await message.answer(f"已添加词条: {entry_id}")
         return
 
@@ -805,6 +833,15 @@ async def lexicon_command(message: Message, app_context: AppContext) -> None:
             return
         done = lexicon_admin.delete_entry(app_context.keyword_files_dir, parts[2])
         app_context.keyword_store.force_reload()
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="lexicon_rule_adjusted",
+                detail_json={"operation": "del", "entry_id": parts[2], "changed": done},
+            )
         await message.answer("已删除" if done else "未找到词条")
         return
 
@@ -815,6 +852,15 @@ async def lexicon_command(message: Message, app_context: AppContext) -> None:
         enabled = action == "enable"
         done = lexicon_admin.set_entry_enabled(app_context.keyword_files_dir, parts[2], enabled)
         app_context.keyword_store.force_reload()
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="lexicon_rule_adjusted",
+                detail_json={"operation": action, "entry_id": parts[2], "changed": done},
+            )
         await message.answer("已更新" if done else "未找到词条")
         return
 
@@ -837,12 +883,30 @@ async def lexicon_command(message: Message, app_context: AppContext) -> None:
             observe_only=False,
         )
         app_context.keyword_store.force_reload()
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="lexicon_rule_adjusted",
+                detail_json={"operation": "import", "kind": kind, "category": category, "risk": risk, "count": count},
+            )
         await message.answer(f"已导入 {count} 条")
         return
 
     if action == "export":
         payload = lexicon_admin.export_custom_entries(app_context.keyword_files_dir).encode("utf-8")
         document = BufferedInputFile(payload, filename="custom_lexicon.json")
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="lexicon_rule_adjusted",
+                detail_json={"operation": "export", "size": len(payload)},
+            )
         await message.answer_document(document=document, caption="自定义词库导出")
         return
 
@@ -984,9 +1048,24 @@ async def night_mode_command(message: Message, app_context: AppContext) -> None:
             if len(parts) != 6:
                 await message.answer("用法: /nightmode set <chat_id> <timezone> <start_hour> <end_hour>")
                 return
-            night["timezone"] = parts[3]
-            night["start_hour"] = int(parts[4])
-            night["end_hour"] = int(parts[5])
+            timezone_name = parts[3]
+            try:
+                _ = ZoneInfo(timezone_name)
+            except ZoneInfoNotFoundError:
+                await message.answer("无效时区。示例: Asia/Shanghai")
+                return
+            try:
+                start_hour = int(parts[4])
+                end_hour = int(parts[5])
+            except ValueError:
+                await message.answer("start_hour 和 end_hour 必须是整数")
+                return
+            if start_hour < 0 or start_hour > 23 or end_hour < 0 or end_hour > 23:
+                await message.answer("小时范围必须在 0-23")
+                return
+            night["timezone"] = timezone_name
+            night["start_hour"] = start_hour
+            night["end_hour"] = end_hour
         else:
             await message.answer("不支持的 nightmode 操作")
             return
@@ -1032,6 +1111,7 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
             await message.answer("违规记录不存在")
             return
         whitelist_detail: dict[str, object] = {"type": "none"}
+        candidate_fp_updates = 0
         if action_token.startswith("word:"):
             word = action_token.split(":", 1)[1]
             entry_id = lexicon_admin.add_entry(
@@ -1046,6 +1126,17 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
                 mute_seconds_override=None,
             )
             whitelist_detail = {"type": "word", "value": word, "entry_id": entry_id}
+            candidate_fp_updates = await repositories.mark_learning_candidate_false_positive_by_lexicon_entry(
+                session=session,
+                chat_id=chat_id,
+                lexicon_entry_id=entry_id,
+            )
+            _ = await repositories.mark_learning_candidate_false_positive_by_key(
+                session=session,
+                chat_id=chat_id,
+                candidate_type=LexiconKind.WORD.value,
+                normalized_value=normalize_text(word),
+            )
         elif action_token.startswith("domain:"):
             domain = action_token.split(":", 1)[1]
             entry_id = lexicon_admin.add_entry(
@@ -1060,6 +1151,17 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
                 mute_seconds_override=None,
             )
             whitelist_detail = {"type": "domain", "value": domain, "entry_id": entry_id}
+            candidate_fp_updates = await repositories.mark_learning_candidate_false_positive_by_lexicon_entry(
+                session=session,
+                chat_id=chat_id,
+                lexicon_entry_id=entry_id,
+            )
+            _ = await repositories.mark_learning_candidate_false_positive_by_key(
+                session=session,
+                chat_id=chat_id,
+                candidate_type=LexiconKind.DOMAIN.value,
+                normalized_value=normalize_domain(domain),
+            )
         elif action_token.startswith("user:"):
             user_id = int(action_token.split(":", 1)[1])
             await repositories.add_whitelist_user(session, chat_id, user_id)
@@ -1086,6 +1188,7 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
                 "reason": reason,
                 "whitelist": whitelist_detail,
                 "revoked_count": len(revoked_actions),
+                "candidate_false_positive_updated": candidate_fp_updates,
             },
         )
     app_context.keyword_store.force_reload()
@@ -1108,6 +1211,447 @@ async def false_positive_rules_command(message: Message, app_context: AppContext
         return
     lines = [f"{item['rule_name']} -> {item['false_positive_count']}" for item in rows]
     await message.answer("\n".join(lines))
+
+
+def _format_candidate_rows(rows: list[object]) -> str:
+    lines: list[str] = []
+    for item in rows:
+        candidate_id = int(getattr(item, "id"))
+        candidate_type = str(getattr(item, "candidate_type"))
+        category = str(getattr(item, "category"))
+        value = str(getattr(item, "normalized_value"))
+        status = str(getattr(item, "status"))
+        evidence = int(getattr(item, "evidence_count"))
+        confidence = int(getattr(item, "confidence_score"))
+        lines.append(
+            f"{candidate_id} | {candidate_type} | {category} | {status} | evidence={evidence} | score={confidence} | {value}"
+        )
+    if len(lines) == 0:
+        return "暂无候选建议"
+    return "\n".join(lines)
+
+
+@router.message(Command("learn"))
+async def learning_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_private_owner(message, app_context):
+        return
+    actor = message.from_user
+    if actor is None:
+        return
+    parts = _parse_command_parts(message.text or "")
+    if len(parts) < 2:
+        await message.answer(
+            "用法:\n"
+            "/learn scan <chat_id> <days> <limit>\n"
+            "/learn list <chat_id> <pending|observing|approved|rejected|false_positive|all> <limit>\n"
+            "/learn approve <candidate_id> <observe|enable>\n"
+            "/learn reject <candidate_id> <reason>\n"
+            "/learn stats <chat_id>"
+        )
+        return
+
+    action = parts[1].lower()
+    if action == "scan":
+        if len(parts) != 5:
+            await message.answer("用法: /learn scan <chat_id> <days> <limit>")
+            return
+        chat_id = _parse_positive_int(parts[2])
+        days = _parse_positive_int(parts[3])
+        limit = _parse_positive_int(parts[4])
+        if chat_id is None or days is None or limit is None:
+            await message.answer("参数必须是正整数")
+            return
+        async for session in session_scope(app_context.session_factory):
+            result = await learning_intelligence.scan_history_and_build_suggestions(
+                session=session,
+                chat_id=chat_id,
+                days=days,
+                limit=limit,
+            )
+            promoted = await learning_automation.auto_promote_candidates_to_observing(
+                session=session,
+                keyword_files_dir=app_context.keyword_files_dir,
+                chat_id=chat_id,
+                min_confidence=app_context.settings.learning_auto_promote_min_confidence,
+                min_evidence=app_context.settings.learning_auto_promote_min_evidence,
+                max_false_positive_ratio_percent=app_context.settings.learning_auto_promote_max_fp_ratio_percent,
+                limit=120,
+            )
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="learning_suggestion_generated",
+                detail_json={
+                    "days": days,
+                    "limit": limit,
+                    "scanned_violations": result.scanned_violations,
+                    "upserted_candidates": result.upserted_candidates,
+                    "auto_observing_promotions": promoted,
+                },
+            )
+        if promoted > 0:
+            app_context.keyword_store.force_reload()
+        await message.answer(
+            f"学习扫描完成\nscanned={result.scanned_violations}\nupserted={result.upserted_candidates}\nauto_observing={promoted}\npending={result.pending_candidates}\nobserving={result.observing_candidates}"
+        )
+        return
+
+    if action == "list":
+        if len(parts) != 5:
+            await message.answer("用法: /learn list <chat_id> <status|all> <limit>")
+            return
+        chat_id = _parse_positive_int(parts[2])
+        status_token = parts[3].lower()
+        limit = _parse_positive_int(parts[4])
+        if chat_id is None or limit is None:
+            await message.answer("参数必须是正整数")
+            return
+        status = None if status_token == "all" else status_token
+        async for session in session_scope(app_context.session_factory):
+            rows = await repositories.list_learning_candidates(session, chat_id, status, limit)
+        await message.answer(_format_candidate_rows(rows))
+        return
+
+    if action == "approve":
+        if len(parts) != 4:
+            await message.answer("用法: /learn approve <candidate_id> <observe|enable>")
+            return
+        candidate_id = _parse_positive_int(parts[2])
+        approve_mode = parts[3].lower()
+        if candidate_id is None or approve_mode not in {"observe", "enable"}:
+            await message.answer("参数错误")
+            return
+        async for session in session_scope(app_context.session_factory):
+            if approve_mode == "observe":
+                result = await learning_review.approve_candidate_to_observe(
+                    session=session,
+                    keyword_files_dir=app_context.keyword_files_dir,
+                    actor_user_id=actor.id,
+                    candidate_id=candidate_id,
+                )
+            else:
+                result = await learning_review.approve_candidate_to_enforce(
+                    session=session,
+                    keyword_files_dir=app_context.keyword_files_dir,
+                    actor_user_id=actor.id,
+                    candidate_id=candidate_id,
+                )
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="learning_candidate_confirmed",
+                detail_json={
+                    "candidate_id": candidate_id,
+                    "mode": approve_mode,
+                    "status": result.status,
+                    "lexicon_entry_id": result.lexicon_entry_id,
+                },
+            )
+        app_context.keyword_store.force_reload()
+        await message.answer(result.message)
+        return
+
+    if action == "reject":
+        if len(parts) < 4:
+            await message.answer("用法: /learn reject <candidate_id> <reason>")
+            return
+        candidate_id = _parse_positive_int(parts[2])
+        reason = " ".join(parts[3:])
+        if candidate_id is None:
+            await message.answer("candidate_id 必须是正整数")
+            return
+        async for session in session_scope(app_context.session_factory):
+            result = await learning_review.reject_candidate(
+                session=session,
+                actor_user_id=actor.id,
+                candidate_id=candidate_id,
+                reason=reason,
+            )
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=None,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="learning_candidate_rejected",
+                detail_json={"candidate_id": candidate_id, "reason": reason, "status": result.status},
+            )
+        await message.answer(result.message)
+        return
+
+    if action == "stats":
+        if len(parts) != 3:
+            await message.answer("用法: /learn stats <chat_id>")
+            return
+        chat_id = _parse_positive_int(parts[2])
+        if chat_id is None:
+            await message.answer("chat_id 必须是正整数")
+            return
+        async for session in session_scope(app_context.session_factory):
+            status_count = await repositories.count_learning_candidates_by_status(session, chat_id)
+        await message.answer(
+            "学习候选统计\n"
+            f"chat_id={chat_id}\n"
+            f"pending={status_count.get('pending', 0)}\n"
+            f"observing={status_count.get('observing', 0)}\n"
+            f"approved={status_count.get('approved', 0)}\n"
+            f"rejected={status_count.get('rejected', 0)}\n"
+            f"false_positive={status_count.get('false_positive', 0)}"
+        )
+        return
+
+    await message.answer("不支持的 learn 操作")
+
+
+@router.message(Command("auditexport"))
+async def audit_export_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_private_owner(message, app_context):
+        return
+    actor = message.from_user
+    if actor is None:
+        return
+    parts = _parse_command_parts(message.text or "")
+    if len(parts) != 4:
+        await message.answer("用法: /auditexport <chat_id> <json|csv> <days>")
+        return
+    chat_id = _parse_positive_int(parts[1])
+    fmt = parts[2].lower()
+    days = _parse_positive_int(parts[3])
+    if chat_id is None or days is None or fmt not in {"json", "csv"}:
+        await message.answer("参数错误")
+        return
+    async for session in session_scope(app_context.session_factory):
+        if fmt == "json":
+            payload = await audit_export.export_audit_logs_json(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=None,
+                action_prefix=None,
+                days=days,
+                limit=10000,
+            )
+            filename = f"audit-{chat_id}.json"
+        else:
+            payload = await audit_export.export_audit_logs_csv(
+                session=session,
+                chat_id=chat_id,
+                actor_user_id=None,
+                action_prefix=None,
+                days=days,
+                limit=10000,
+            )
+            filename = f"audit-{chat_id}.csv"
+        await repositories.create_audit_log(
+            session=session,
+            chat_id=chat_id,
+            actor_user_id=actor.id,
+            target_user_id=None,
+            action="audit_export_owner",
+            detail_json={"format": fmt, "days": days, "size_bytes": len(payload)},
+        )
+    document = BufferedInputFile(payload, filename=filename)
+    await message.answer_document(document=document, caption="审计日志导出")
+
+
+@router.message(Command("groupstats"))
+async def group_stats_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_private_owner(message, app_context):
+        return
+    actor = message.from_user
+    if actor is None:
+        return
+    parts = _parse_command_parts(message.text or "")
+    if len(parts) != 3:
+        await message.answer("用法: /groupstats <chat_id> <days>")
+        return
+    chat_id = _parse_positive_int(parts[1])
+    days = _parse_positive_int(parts[2])
+    if chat_id is None or days is None:
+        await message.answer("参数错误")
+        return
+    async for session in session_scope(app_context.session_factory):
+        report = await statistics.build_chat_statistics_report(session, chat_id, days)
+        candidate_status = await repositories.count_learning_candidates_by_status(session, chat_id)
+        await repositories.create_audit_log(
+            session=session,
+            chat_id=chat_id,
+            actor_user_id=actor.id,
+            target_user_id=None,
+            action="group_stats_owner",
+            detail_json={"days": days},
+        )
+    tail = (
+        "\n\n学习候选状态:\n"
+        f"pending={candidate_status.get('pending', 0)} "
+        f"observing={candidate_status.get('observing', 0)} "
+        f"approved={candidate_status.get('approved', 0)} "
+        f"rejected={candidate_status.get('rejected', 0)} "
+        f"false_positive={candidate_status.get('false_positive', 0)}"
+    )
+    await message.answer(report + tail)
+
+
+@router.message(Command("candidate"))
+async def candidate_review_group_command(message: Message, app_context: AppContext) -> None:
+    if not await _require_group_chat(message):
+        return
+    chat = message.chat
+    actor = message.from_user
+    if chat is None or actor is None:
+        return
+    parts = _parse_command_parts(message.text or "")
+    if len(parts) < 2:
+        await message.answer(
+            "用法:\n"
+            "/candidate list <status|all> <limit>\n"
+            "/candidate scan <days> <limit>\n"
+            "/candidate approve <candidate_id> <observe|enable>\n"
+            "/candidate reject <candidate_id> <reason>"
+        )
+        return
+    decision = await _authorize_management_command(
+        message=message,
+        app_context=app_context,
+        action=PermissionAction.VIEW_SETTINGS,
+        duration_seconds=None,
+        target_user_id=None,
+    )
+    if decision is None:
+        return
+    action = parts[1].lower()
+    if action == "list":
+        if len(parts) != 4:
+            await message.answer("用法: /candidate list <status|all> <limit>")
+            return
+        status_token = parts[2].lower()
+        limit = _parse_positive_int(parts[3])
+        if limit is None:
+            await message.answer("limit 必须是正整数")
+            return
+        status = None if status_token == "all" else status_token
+        async for session in session_scope(app_context.session_factory):
+            rows = await repositories.list_learning_candidates(session, chat.id, status, limit)
+            await log_management_event(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="candidate_list",
+                decision=decision,
+                detail_json={"status": status_token, "limit": limit, "result_count": len(rows)},
+            )
+        await message.answer(_format_candidate_rows(rows))
+        return
+    if action == "scan":
+        if len(parts) != 4:
+            await message.answer("用法: /candidate scan <days> <limit>")
+            return
+        days = _parse_positive_int(parts[2])
+        limit = _parse_positive_int(parts[3])
+        if days is None or limit is None:
+            await message.answer("参数错误")
+            return
+        async for session in session_scope(app_context.session_factory):
+            result = await learning_intelligence.scan_history_and_build_suggestions(session, chat.id, days, limit)
+            promoted = await learning_automation.auto_promote_candidates_to_observing(
+                session=session,
+                keyword_files_dir=app_context.keyword_files_dir,
+                chat_id=chat.id,
+                min_confidence=app_context.settings.learning_auto_promote_min_confidence,
+                min_evidence=app_context.settings.learning_auto_promote_min_evidence,
+                max_false_positive_ratio_percent=app_context.settings.learning_auto_promote_max_fp_ratio_percent,
+                limit=120,
+            )
+            await log_management_event(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="candidate_scan",
+                decision=decision,
+                detail_json={
+                    "days": days,
+                    "limit": limit,
+                    "scanned_violations": result.scanned_violations,
+                    "upserted_candidates": result.upserted_candidates,
+                    "auto_observing_promotions": promoted,
+                },
+            )
+        if promoted > 0:
+            app_context.keyword_store.force_reload()
+        await message.answer(f"学习扫描完成: scanned={result.scanned_violations} upserted={result.upserted_candidates} auto_observing={promoted}")
+        return
+    if action == "approve":
+        if len(parts) != 4:
+            await message.answer("用法: /candidate approve <candidate_id> <observe|enable>")
+            return
+        candidate_id = _parse_positive_int(parts[2])
+        mode = parts[3].lower()
+        if candidate_id is None or mode not in {"observe", "enable"}:
+            await message.answer("参数错误")
+            return
+        async for session in session_scope(app_context.session_factory):
+            row = await repositories.get_learning_candidate_by_id(session, candidate_id)
+            if row is None or row.chat_id != chat.id:
+                await message.answer("候选词不存在或不属于本群")
+                return
+            if mode == "observe":
+                result = await learning_review.approve_candidate_to_observe(
+                    session=session,
+                    keyword_files_dir=app_context.keyword_files_dir,
+                    actor_user_id=actor.id,
+                    candidate_id=candidate_id,
+                )
+            else:
+                result = await learning_review.approve_candidate_to_enforce(
+                    session=session,
+                    keyword_files_dir=app_context.keyword_files_dir,
+                    actor_user_id=actor.id,
+                    candidate_id=candidate_id,
+                )
+            await log_management_event(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="candidate_approve",
+                decision=decision,
+                detail_json={"candidate_id": candidate_id, "mode": mode, "status": result.status},
+            )
+        app_context.keyword_store.force_reload()
+        await message.answer(result.message)
+        return
+    if action == "reject":
+        if len(parts) < 4:
+            await message.answer("用法: /candidate reject <candidate_id> <reason>")
+            return
+        candidate_id = _parse_positive_int(parts[2])
+        reason = " ".join(parts[3:])
+        if candidate_id is None:
+            await message.answer("candidate_id 必须是正整数")
+            return
+        async for session in session_scope(app_context.session_factory):
+            row = await repositories.get_learning_candidate_by_id(session, candidate_id)
+            if row is None or row.chat_id != chat.id:
+                await message.answer("候选词不存在或不属于本群")
+                return
+            result = await learning_review.reject_candidate(session, actor.id, candidate_id, reason)
+            await log_management_event(
+                session=session,
+                chat_id=chat.id,
+                actor_user_id=actor.id,
+                target_user_id=None,
+                action="candidate_reject",
+                decision=decision,
+                detail_json={"candidate_id": candidate_id, "reason": reason, "status": result.status},
+            )
+        await message.answer(result.message)
+        return
+
+    await message.answer("不支持的 candidate 操作")
 
 
 

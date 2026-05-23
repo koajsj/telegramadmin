@@ -60,7 +60,8 @@ install_docker() {
 prepare_env() {
   local token="${BOT_TOKEN:-}"
   if [[ -z "${token}" ]]; then
-    read -r -p "请输入 Telegram Bot Token: " token
+    read -r -s -p "请输入 Telegram Bot Token: " token
+    echo ""
   fi
   if [[ -z "${token}" ]]; then
     echo "BOT_TOKEN 不能为空"
@@ -91,12 +92,22 @@ prepare_env() {
     postgres_password="$(generate_secret)"
   fi
 
+  local redis_password
+  redis_password="${REDIS_PASSWORD:-}"
+  if [[ -z "${redis_password}" ]]; then
+    redis_password="$(read_existing_env_value "REDIS_PASSWORD")"
+  fi
+  if [[ -z "${redis_password}" ]]; then
+    redis_password="$(generate_secret)"
+  fi
+
   set_env "BOT_TOKEN" "${token}"
   set_env "BOT_OWNER_IDS" "${owner_ids}"
   set_env "ADMIN_IDS" "${owner_ids}"
   set_env "POSTGRES_PASSWORD" "${postgres_password}"
+  set_env "REDIS_PASSWORD" "${redis_password}"
   set_env "DATABASE_URL" "postgresql+asyncpg://postgres:${postgres_password}@postgres:5432/tgadmin"
-  set_env "REDIS_URL" "redis://redis:6379/0"
+  set_env "REDIS_URL" "redis://:${redis_password}@redis:6379/0"
   set_env "LOG_LEVEL" "INFO"
   set_env "ENVIRONMENT" "production"
   set_env "AUTO_INIT_SCHEMA" "false"

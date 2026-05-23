@@ -132,6 +132,33 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
+class LearningCandidate(Base):
+    __tablename__ = "learning_candidates"
+    __table_args__ = (UniqueConstraint("chat_id", "candidate_type", "normalized_value", name="uq_learning_candidate_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chat_id: Mapped[int] = mapped_column(ForeignKey("chats.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalized_value: Mapped[str] = mapped_column(String(255), nullable=False)
+    sample_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    confirm_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    false_positive_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    confidence_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source_stats_json: Mapped[dict[str, int]] = mapped_column(JSON, default=dict, nullable=False)
+    lexicon_entry_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    rejected_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class WhitelistUser(Base):
     __tablename__ = "whitelist_users"
     __table_args__ = (UniqueConstraint("chat_id", "user_id", name="uq_whitelist_chat_user"),)

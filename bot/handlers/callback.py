@@ -56,6 +56,31 @@ async def _ensure_target_user_exists(app_context: AppContext, user_id: int) -> N
 @router.callback_query(ModerateAction.filter())
 async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateAction, app_context: AppContext) -> None:
     actor = query.from_user
+    source_chat_id = query.message.chat.id if query.message is not None and query.message.chat is not None else None
+    async for session in session_scope(app_context.session_factory):
+        chat_model = await repositories.get_chat_settings(session, callback_data.chat_id)
+    if chat_model is None:
+        await query.answer("群组不存在", show_alert=True)
+        return
+    expected_source_chat_id = chat_model.log_chat_id if chat_model.log_chat_id is not None else callback_data.chat_id
+    if source_chat_id is None or int(source_chat_id) != int(expected_source_chat_id):
+        async for session in session_scope(app_context.session_factory):
+            await repositories.create_audit_log(
+                session=session,
+                chat_id=callback_data.chat_id,
+                actor_user_id=actor.id,
+                target_user_id=callback_data.user_id,
+                action="cb_source_chat_mismatch",
+                detail_json={
+                    "status": "denied",
+                    "source_chat_id": source_chat_id,
+                    "expected_source_chat_id": expected_source_chat_id,
+                    "callback_data": query.data or "",
+                },
+            )
+        await query.answer("无效来源", show_alert=True)
+        return
+
     permission_action = CALLBACK_ACTION_MAP.get(callback_data.action)
     if permission_action is None:
         await query.answer("不支持的操作", show_alert=True)

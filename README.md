@@ -16,6 +16,9 @@
 - 基础命令：已实现 `/start /help /warn /mute /ban /unban /history /settings /setlog /reloadkeywords`。
 - 私聊面板：支持通过 `/start` 或 `/panel` 打开多级 Inline 管理面板，可在私聊中完成常用管理操作。
 - 自动审核能力：已实现关键词过滤、链接过滤、刷屏检测，支持规则命中后自动处置。
+- 智能学习能力：基于违规消息、处罚结果、误判反馈与词库命中自动生成候选词/候选规则建议。
+- 自动学习巡检：后台定时扫描各群历史违规并自动产出建议，符合阈值的候选会自动进入观察模式（仅日志，不强制处罚）。
+- 审核启用机制：新学习词条默认进入候选或观察模式，需 Owner/Admin 审核后才可正式启用。
 - 新人管理：支持入群欢迎、新人观察期、观察期内禁链接/禁媒体。
 - 阶梯处罚：支持删除 -> 警告 -> 短禁言 -> 长禁言 -> 封禁的升级策略。
 - 观察模式：支持只记录/通知不执行处罚，便于上线前调参与误封控制。
@@ -33,6 +36,12 @@
   - `/panel`：进入群组选择与管理面板。
   - `/help`：查看命令说明与权限说明。
   - `/status`：查看运行状态与当前配置摘要。
+  - `/learn scan <chat_id> <days> <limit>`：生成历史学习建议（仅 Owner）。
+  - `/learn list <chat_id> <status|all> <limit>`：查看候选建议（仅 Owner）。
+  - `/learn approve <candidate_id> <observe|enable>`：候选审核通过（仅 Owner）。
+  - `/learn reject <candidate_id> <reason>`：拒绝候选（仅 Owner）。
+  - `/auditexport <chat_id> <json|csv> <days>`：导出审计日志（仅 Owner）。
+  - `/groupstats <chat_id> <days>`：群组统计报表（仅 Owner）。
 - 群内命令：
   - `/warn <user_id>`：警告目标用户并记录处罚历史（管理员可用）。
   - `/mute <user_id> <10m|1h|1d>`：禁言目标用户（普通管理员受最大禁言时长限制）。
@@ -40,6 +49,10 @@
   - `/unban <user_id>`：解封用户（仅 Owner）。
   - `/history <user_id>`：查看目标用户处罚历史（管理员可用）。
   - `/settings`：查看当前群规则与开关配置（管理员可用）。
+  - `/candidate list <status|all> <limit>`：查看本群学习候选（管理员可用）。
+  - `/candidate scan <days> <limit>`：按历史违规扫描候选（管理员可用）。
+  - `/candidate approve <id> <observe|enable>`：候选审核通过（管理员可用）。
+  - `/candidate reject <id> <reason>`：候选拒绝（管理员可用）。
   - `/setlog <log_chat_id>`：设置日志群（仅 Owner）。
   - `/reloadkeywords`：刷新关键词词库（仅 Owner）。
 - Inline 按钮（日志群快捷处置）：
@@ -50,7 +63,8 @@
   - `忽略（不处罚）`：不执行处罚，仅结束当前处置。
   - `白名单（后续放行）`：加入白名单，降低误杀。
 - 私聊面板按钮：
-  - 已加入中文短说明文案，例如“运行状态（健康检查）”“审计导出（CSV/JSON）”。
+  - 已加入中文短说明文案，例如“运行状态（健康检查）”“学习候选（扫描/审核）”。
+  - “数据统计”“审计导出”在私聊面板中为 Owner-only。
   - 所有按钮回调会二次鉴权，不信任 callback_data。
 
 ---
@@ -60,9 +74,13 @@
 ```text
 bot/                  # 新架构主代码
   handlers/           # 命令、消息、回调、入群请求
+  middlewares/        # 私聊 Owner 守卫等访问控制中间层/守卫
   services/           # 规则、处罚、新人、日志
+  tasks/              # 后台任务入口（如管理员同步任务）
   database/           # SQLAlchemy 模型、会话、仓储
   schemas/            # 类型定义
+  keyboards/          # Inline 键盘构建
+  utils/              # 通用权限与工具函数
   main.py             # Bot 入口
 
 scripts/              # 运维脚本
@@ -194,11 +212,24 @@ cat backup.sql | docker compose exec -T postgres psql -U postgres -d tgadmin
 - `BOT_OWNER_IDS`（Owner Telegram ID，逗号分隔）
 - `DATABASE_URL`
 - `REDIS_URL`
+- `REDIS_PASSWORD`
 - `LOG_LEVEL`
 - `ENVIRONMENT`
 - `WEBHOOK_SECRET`
 
 你不需要手工创建配置文件。
+
+自动学习相关参数（可选）：
+- `LEARNING_AUTO_SCAN_ENABLED`：是否开启后台自动学习巡检。
+- `LEARNING_AUTO_SCAN_INTERVAL_SECONDS`：巡检间隔秒数。
+- `LEARNING_AUTO_SCAN_DAYS`：历史回溯天数。
+- `LEARNING_AUTO_SCAN_LIMIT`：每次扫描最多处理违规记录数。
+- `LEARNING_AUTO_PROMOTE_MIN_CONFIDENCE`：自动转观察所需最小置信分。
+- `LEARNING_AUTO_PROMOTE_MIN_EVIDENCE`：自动转观察所需最小证据数。
+- `LEARNING_AUTO_PROMOTE_MAX_FP_RATIO_PERCENT`：自动转观察允许的最大误判占比。
+- `MUTE_AUTO_RELEASE_ENABLED`：是否开启禁言到期自动解除兜底任务。
+- `MUTE_AUTO_RELEASE_INTERVAL_SECONDS`：到期巡检间隔秒数。
+- `MUTE_AUTO_RELEASE_LOOKBACK_DAYS`：巡检历史禁言窗口天数。
 
 权限规则：
 - 群管理员：`warn`、短时 `mute`（不超过 `GROUP_ADMIN_MAX_MUTE_SECONDS`）、查看配置和历史。
@@ -215,6 +246,15 @@ python -m unittest discover -s tests -v
 
 当前测试覆盖：
 - MVP 服务层（阶梯处罚、新人限制、规则命中）
+- 权限控制、配置解析、缓存与迁移烟雾测试
+
+---
+
+## 10. 代码仓库清理约束
+
+- `logs/`、`__pycache__/`、`.venv/`、`*.sqlite3` 已加入 `.gitignore`。
+- 不提交缓存文件、临时文件、运行时日志。
+- 任何文件删除前需先确认未被引用；重命名/移动后必须同步更新 import。
 
 ---
 

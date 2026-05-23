@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import Select, and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.database.models import AdminGrant, AuditLog, BlacklistUser, Chat, ChatAdmin, ChatMember, MessageStat, Punishment, Rule, User, UserReport, Violation, WhitelistUser
+from bot.database.models import AdminGrant, AuditLog, BlacklistUser, Chat, ChatAdmin, ChatMember, LearningCandidate, MessageStat, Punishment, Rule, User, UserReport, Violation, WhitelistUser
 
 
 def _utc_now() -> datetime:
@@ -205,6 +205,12 @@ async def create_punishment(session: AsyncSession, violation_id: int | None, cha
     return punishment
 
 
+async def get_punishment_by_id(session: AsyncSession, punishment_id: int) -> Punishment | None:
+    query: Select[tuple[Punishment]] = select(Punishment).where(Punishment.id == punishment_id)
+    result = await session.execute(query)
+    return result.scalar_one_or_none()
+
+
 async def create_audit_log(session: AsyncSession, chat_id: int | None, actor_user_id: int | None, target_user_id: int | None, action: str, detail_json: dict[str, object]) -> AuditLog:
     item = AuditLog(
         chat_id=chat_id,
@@ -216,6 +222,43 @@ async def create_audit_log(session: AsyncSession, chat_id: int | None, actor_use
     session.add(item)
     await session.flush()
     return item
+
+
+async def list_recent_mute_punishments(
+    session: AsyncSession,
+    since: datetime,
+    limit: int,
+) -> list[Punishment]:
+    query: Select[tuple[Punishment]] = (
+        select(Punishment)
+        .where(
+            and_(
+                Punishment.action == "mute",
+                Punishment.duration_seconds.is_not(None),
+                Punishment.created_at >= since,
+            )
+        )
+        .order_by(Punishment.created_at.asc())
+        .limit(limit)
+    )
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def has_audit_action_for_punishment(
+    session: AsyncSession,
+    action: str,
+    punishment_id: int,
+) -> bool:
+    query = select(func.count(AuditLog.id)).where(
+        and_(
+            AuditLog.action == action,
+            AuditLog.detail_json["punishment_id"].as_integer() == punishment_id,
+        )
+    )
+    result = await session.execute(query)
+    count = result.scalar_one()
+    return int(count) > 0
 
 
 async def list_user_history(session: AsyncSession, chat_id: int, user_id: int, limit: int) -> list[Punishment]:
@@ -560,6 +603,230 @@ async def top_false_positive_rules(session: AsyncSession, chat_id: int, limit: i
     for rule_name, count in rows:
         result.append({"rule_name": str(rule_name), "false_positive_count": int(count)})
     return result
+
+
+async def list_recent_violations(
+    session: AsyncSession,
+    chat_id: int,
+    since: datetime,
+    limit: int,
+) -> list[Violation]:
+    query: Select[tuple[Violation]] = (
+        select(Violation)
+        .where(and_(Violation.chat_id == chat_id, Violation.created_at >= since))
+        .order_by(Violation.created_at.desc())
+        .limit(limit)
+    )
+    result = await session.execute(query)
+    return list(result.scalars().all())
+
+
+async def list_false_positive_violation_ids(
+    session: AsyncSession,
+    chat_id: int,
+    since: datetime,
+    limit: int,
+) -> set[int]:
+    query = (
+        select(AuditLog.detail_json["violation_id"].as_integer())
+        .where(
+            and_(
+                AuditLog.chat_id == chat_id,
+                AuditLog.action == "false_positive_marked",
+                AuditLog.created_at >= since,
+            )
+        )
+        .order_by(AuditLog.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await session.execute(query)).scalars().all()
+    result: set[int] = set()
+    for item in rows:
+        if item is None:
+            continue
+        result.add(int(item))
+    return result
+
+
+async def list_punishment_actions_by_violation_ids(
+    session: AsyncSession,
+    violation_ids: list[int],
+) -> dict[int, str]:
+    if len(violation_ids) == 0:
+        return {}
+    query: Select[tuple[Punishment]] = select(Punishment).where(Punishment.violation_id.in_(violation_ids))
+    rows = list((await session.execute(query)).scalars().all())
+    result: dict[int, str] = {}
+    for row in rows:
+        if row.violation_id is None:
+            continue
+        current = result.get(int(row.violation_id))
+        if current in {"ban", "kick"}:
+            continue
+        result[int(row.violation_id)] = str(row.action)
+    return result
+
+
+async def get_learning_candidate_by_id(session: AsyncSession, candidate_id: int) -> LearningCandidate | None:
+    query: Select[tuple[LearningCandidate]] = select(LearningCandidate).where(LearningCandidate.id == candidate_id)
+    result = await session.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def get_learning_candidate_by_key(
+    session: AsyncSession,
+    chat_id: int,
+    candidate_type: str,
+    normalized_value: str,
+) -> LearningCandidate | None:
+    query: Select[tuple[LearningCandidate]] = select(LearningCandidate).where(
+        and_(
+            LearningCandidate.chat_id == chat_id,
+            LearningCandidate.candidate_type == candidate_type,
+            LearningCandidate.normalized_value == normalized_value,
+        )
+    )
+    result = await session.execute(query)
+    return result.scalar_one_or_none()
+
+
+async def upsert_learning_candidate(
+    session: AsyncSession,
+    chat_id: int,
+    candidate_type: str,
+    category: str,
+    normalized_value: str,
+    sample_value: str | None,
+    signal: str,
+    confidence_delta: int,
+    false_positive_delta: int,
+) -> LearningCandidate:
+    existing = await get_learning_candidate_by_key(session, chat_id, candidate_type, normalized_value)
+    if existing is None:
+        source_stats = {signal: 1}
+        candidate = LearningCandidate(
+            chat_id=chat_id,
+            candidate_type=candidate_type,
+            category=category,
+            normalized_value=normalized_value,
+            sample_value=sample_value,
+            status="pending",
+            evidence_count=1,
+            hit_count=1,
+            confirm_count=0,
+            false_positive_count=max(false_positive_delta, 0),
+            confidence_score=max(confidence_delta - false_positive_delta * 20, 0),
+            source_stats_json=source_stats,
+        )
+        session.add(candidate)
+        await session.flush()
+        return candidate
+
+    current_stats = dict(existing.source_stats_json) if isinstance(existing.source_stats_json, dict) else {}
+    current_stats[signal] = int(current_stats.get(signal, 0)) + 1
+    existing.source_stats_json = current_stats
+    existing.category = category
+    existing.sample_value = sample_value if sample_value is not None else existing.sample_value
+    existing.evidence_count = int(existing.evidence_count) + 1
+    existing.hit_count = int(existing.hit_count) + 1
+    if false_positive_delta > 0:
+        existing.false_positive_count = int(existing.false_positive_count) + false_positive_delta
+    adjusted_score = int(existing.confidence_score) + confidence_delta - false_positive_delta * 20
+    existing.confidence_score = max(adjusted_score, 0)
+    await session.flush()
+    return existing
+
+
+async def list_learning_candidates(
+    session: AsyncSession,
+    chat_id: int,
+    status: str | None,
+    limit: int,
+) -> list[LearningCandidate]:
+    query = select(LearningCandidate).where(LearningCandidate.chat_id == chat_id)
+    if status is not None and status != "":
+        query = query.where(LearningCandidate.status == status)
+    query = query.order_by(LearningCandidate.confidence_score.desc(), LearningCandidate.last_seen_at.desc()).limit(limit)
+    rows = await session.execute(query)
+    return list(rows.scalars().all())
+
+
+async def update_learning_candidate_status(
+    session: AsyncSession,
+    candidate_id: int,
+    status: str,
+    actor_user_id: int,
+    note: str | None,
+    lexicon_entry_id: str | None,
+) -> LearningCandidate | None:
+    row = await get_learning_candidate_by_id(session, candidate_id)
+    if row is None:
+        return None
+    row.status = status
+    row.note = note
+    if lexicon_entry_id is not None and lexicon_entry_id != "":
+        row.lexicon_entry_id = lexicon_entry_id
+    now = _utc_now()
+    if status in {"observing", "approved"}:
+        row.approved_by = actor_user_id
+        row.approved_at = now
+        row.rejected_by = None
+        row.rejected_at = None
+        row.confirm_count = int(row.confirm_count) + 1
+    if status in {"rejected", "false_positive"}:
+        row.rejected_by = actor_user_id
+        row.rejected_at = now
+    await session.flush()
+    return row
+
+
+async def count_learning_candidates_by_status(session: AsyncSession, chat_id: int) -> dict[str, int]:
+    query = (
+        select(LearningCandidate.status, func.count(LearningCandidate.id))
+        .where(LearningCandidate.chat_id == chat_id)
+        .group_by(LearningCandidate.status)
+    )
+    rows = (await session.execute(query)).all()
+    result: dict[str, int] = {}
+    for status, count in rows:
+        result[str(status)] = int(count)
+    return result
+
+
+async def mark_learning_candidate_false_positive_by_lexicon_entry(
+    session: AsyncSession,
+    chat_id: int,
+    lexicon_entry_id: str,
+) -> int:
+    query: Select[tuple[LearningCandidate]] = select(LearningCandidate).where(
+        and_(LearningCandidate.chat_id == chat_id, LearningCandidate.lexicon_entry_id == lexicon_entry_id)
+    )
+    rows = list((await session.execute(query)).scalars().all())
+    changed = 0
+    for row in rows:
+        row.false_positive_count = int(row.false_positive_count) + 1
+        row.status = "false_positive"
+        row.confidence_score = max(int(row.confidence_score) - 25, 0)
+        changed += 1
+    if changed > 0:
+        await session.flush()
+    return changed
+
+
+async def mark_learning_candidate_false_positive_by_key(
+    session: AsyncSession,
+    chat_id: int,
+    candidate_type: str,
+    normalized_value: str,
+) -> bool:
+    row = await get_learning_candidate_by_key(session, chat_id, candidate_type, normalized_value)
+    if row is None:
+        return False
+    row.false_positive_count = int(row.false_positive_count) + 1
+    row.status = "false_positive"
+    row.confidence_score = max(int(row.confidence_score) - 25, 0)
+    await session.flush()
+    return True
 
 
 def _default_chat_runtime_settings() -> dict[str, object]:

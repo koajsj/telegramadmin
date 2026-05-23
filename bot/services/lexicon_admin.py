@@ -140,6 +140,41 @@ def set_entry_enabled(directory_path: Path, entry_id: str, enabled: bool) -> boo
     return changed
 
 
+def set_entry_observe_mode(
+    directory_path: Path,
+    entry_id: str,
+    observe_only: bool,
+    action_override: str | None,
+) -> bool:
+    rows = _read_custom_entries(directory_path)
+    changed = False
+    for row in rows:
+        if str(row.get("entry_id", "")) != entry_id:
+            continue
+        row["observe_only"] = observe_only
+        if action_override is None or action_override == "":
+            if "action_override" in row:
+                del row["action_override"]
+        else:
+            override_ok = any(item.value == action_override for item in ModerationAction)
+            if not override_ok:
+                raise LexiconAdminError(f"unsupported action_override: {action_override}")
+            row["action_override"] = action_override
+        changed = True
+        break
+    if changed:
+        _write_custom_entries(directory_path, rows)
+    return changed
+
+
+def get_entry_by_id(directory_path: Path, entry_id: str) -> dict[str, object] | None:
+    rows = _read_custom_entries(directory_path)
+    for row in rows:
+        if str(row.get("entry_id", "")) == entry_id:
+            return dict(row)
+    return None
+
+
 def bulk_import(
     directory_path: Path,
     kind: str,
