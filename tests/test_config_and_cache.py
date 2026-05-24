@@ -65,6 +65,20 @@ class ConfigAndCacheTests(unittest.TestCase):
             reloaded = store.force_reload()
             self.assertEqual(reloaded, ["beta"])
 
+    def test_keyword_store_preserves_old_snapshot_when_json_reload_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "ad_low.txt").write_text("alpha\n", encoding="utf-8")
+
+            store = KeywordStore(directory_path=root, refresh_seconds=60)
+            self.assertEqual(store.get_keywords(), ["alpha"])
+
+            (root / "bad.json").write_text("{not json", encoding="utf-8")
+
+            reloaded = store.force_reload()
+            self.assertEqual(reloaded, ["alpha"])
+            self.assertEqual(store.get_keywords(), ["alpha"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -102,7 +102,7 @@ async def _execute_action(
         try:
             await message.answer(f"用户 {user.id} 违规，已警告。")
             executed = "warn"
-        except Exception as exc:  # noqa: BLE001
+        except TelegramAPIError as exc:
             error = str(exc)
             executed = "none"
     elif action == ModerationAction.MUTE:

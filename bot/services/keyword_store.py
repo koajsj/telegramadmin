@@ -62,7 +62,7 @@ class KeywordStore:
                 if item.kind == LexiconKind.WORD and item.enabled and item.category != "word_whitelist"
             ]
             loaded_keywords = list(dict.fromkeys(loaded_keywords))
-        except Exception as exc:
+        except (LexiconLoadError, OSError, UnicodeError, ValueError) as exc:
             logger.error(
                 "lexicon_reload_failed",
                 extra={

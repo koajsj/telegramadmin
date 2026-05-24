@@ -244,7 +244,10 @@ def _read_policy_file(file_path: Path) -> dict[RiskLevel, RiskPolicy]:
     if not file_path.exists():
         return dict(DEFAULT_RISK_POLICIES)
 
-    raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
+    try:
+        raw_payload = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise LexiconLoadError(f"failed to parse risk_policy file: {file_path}") from exc
     if not isinstance(raw_payload, dict):
         raise LexiconLoadError("risk_policy json must be object")
 
@@ -306,7 +309,10 @@ def load_lexicon_snapshot(directory_path: Path) -> LexiconSnapshot:
     for json_file in sorted(directory_path.glob("*.json")):
         if json_file.name == "risk_policy.json":
             continue
-        parsed = json.loads(json_file.read_text(encoding="utf-8"))
+        try:
+            parsed = json.loads(json_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise LexiconLoadError(f"failed to parse json lexicon file: {json_file}") from exc
         entries, regex_rules, white_words, white_domains = _parse_json_entries(parsed, source_name=f"local:{json_file.name}")
         loaded_entries.extend(entries)
         loaded_regex_rules.extend(regex_rules)

@@ -17,7 +17,7 @@ TELEGRAM_RETRY_DELAY_SECONDS = 0.6
 logger = logging.getLogger(__name__)
 
 
-async def fetch_chat_admins(bot: Bot, chat_id: int) -> list[dict[str, object]]:
+async def fetch_chat_admins(bot: Bot, chat_id: int) -> list[dict[str, object]] | None:
     async def _do_fetch() -> object:
         return await bot.get_chat_administrators(chat_id=chat_id)
 
@@ -29,8 +29,16 @@ async def fetch_chat_admins(bot: Bot, chat_id: int) -> list[dict[str, object]]:
             retry_delay_seconds=TELEGRAM_RETRY_DELAY_SECONDS,
             action=_do_fetch,
         )
-    except (TelegramBadRequest, TelegramForbiddenError):
-        return []
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        logger.warning(
+            "admin_sync_fetch_failed",
+            extra={
+                "chat_id": chat_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return None
 
     rows: list[dict[str, object]] = []
     for member in members:
@@ -54,6 +62,8 @@ async def fetch_chat_admins(bot: Bot, chat_id: int) -> list[dict[str, object]]:
 
 async def sync_single_chat_admins(bot: Bot, session: AsyncSession, chat_id: int) -> int:
     rows = await fetch_chat_admins(bot, chat_id)
+    if rows is None:
+        return 0
     for item in rows:
         await repositories.ensure_user(
             session=session,
