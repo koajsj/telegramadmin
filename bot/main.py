@@ -8,12 +8,16 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats
+from redis.exceptions import RedisError
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from bot.app_context import AppContext
 from bot.config import load_settings
 from bot.database.session import create_engine, create_redis, create_session_factory, init_schema
 from bot.handlers import ALL_ROUTERS
 from bot.services.keyword_store import KeywordStore
+from bot.tasks.admin_sync_task import run_admin_sync_loop
 from bot.tasks.learning_auto_task import run_learning_auto_loop
 from bot.tasks.mute_release_task import run_mute_release_loop
 
@@ -23,6 +27,19 @@ def setup_logging(level: str) -> None:
         level=getattr(logging, level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+
+async def _check_runtime_dependencies(app_context: AppContext) -> None:
+    try:
+        async with app_context.session_factory() as session:
+            await session.execute(text("SELECT 1"))
+    except (SQLAlchemyError, OSError, ConnectionError) as exc:
+        raise RuntimeError(f"database connectivity check failed: {type(exc).__name__}: {exc}") from exc
+
+    try:
+        await app_context.redis.ping()
+    except RedisError as exc:
+        raise RuntimeError(f"redis connectivity check failed: {type(exc).__name__}: {exc}") from exc
 
 
 async def setup_commands(bot: Bot) -> None:
@@ -81,6 +98,7 @@ async def run_bot() -> None:
         keyword_files_dir=keyword_files_dir,
         keyword_store=keyword_store,
     )
+    await _check_runtime_dependencies(app_context)
 
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     await setup_commands(bot)
@@ -90,10 +108,18 @@ async def run_bot() -> None:
 
     learning_task: asyncio.Task[None] | None = None
     mute_release_task: asyncio.Task[None] | None = None
+    admin_sync_task: asyncio.Task[None] | None = None
     if settings.learning_auto_scan_enabled:
         learning_task = asyncio.create_task(run_learning_auto_loop(app_context))
     if settings.mute_auto_release_enabled:
         mute_release_task = asyncio.create_task(run_mute_release_loop(bot=bot, app_context=app_context))
+    admin_sync_task = asyncio.create_task(
+        run_admin_sync_loop(
+            bot=bot,
+            session_factory=app_context.session_factory,
+            interval_seconds=settings.admin_sync_interval_seconds,
+        )
+    )
 
     try:
         await dispatcher.start_polling(bot, app_context=app_context)
@@ -108,6 +134,12 @@ async def run_bot() -> None:
             mute_release_task.cancel()
             try:
                 await mute_release_task
+            except asyncio.CancelledError:
+                pass
+        if admin_sync_task is not None:
+            admin_sync_task.cancel()
+            try:
+                await admin_sync_task
             except asyncio.CancelledError:
                 pass
         await redis.aclose()

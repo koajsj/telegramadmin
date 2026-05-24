@@ -308,7 +308,16 @@ async def panel_callback(query: CallbackQuery, app_context: AppContext) -> None:
         await query.answer()
         try:
             groups = await _groups_for_user(query.message, app_context)
-        except (RedisError, SQLAlchemyError):
+        except (RedisError, SQLAlchemyError, TelegramAPIError) as exc:
+            logger.error(
+                "panel_groups_load_failed",
+                extra={
+                    "actor_user_id": actor.id if actor is not None else None,
+                    "callback_data": data,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             await query.message.answer("群组列表加载失败，请稍后重试")
             return
 

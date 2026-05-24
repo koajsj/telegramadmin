@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
-DEFAULT_BOT_OWNER_ID = 1095020773
+DEFAULT_DEV_OWNER_ID = 1095020773
 
 
 class SettingsError(ValueError):
@@ -119,7 +119,12 @@ def load_settings() -> Settings:
     owner_id_set: set[int] = set()
     for key in ("BOT_OWNER_IDS", "OWNER_IDS", "ADMIN_IDS"):
         owner_id_set.update(_read_id_list(key))
-    owner_id_set.add(DEFAULT_BOT_OWNER_ID)
+    environment = os.getenv("ENVIRONMENT", "development").strip().lower() or "development"
+    if len(owner_id_set) == 0:
+        if environment == "development":
+            owner_id_set.add(DEFAULT_DEV_OWNER_ID)
+        else:
+            raise SettingsError("Missing owner ids: set BOT_OWNER_IDS or OWNER_IDS or ADMIN_IDS")
     owner_ids = tuple(sorted(owner_id_set))
 
     newcomer_watch_seconds = _read_int("NEWCOMER_WATCH_SECONDS", 86400)
@@ -179,7 +184,7 @@ def load_settings() -> Settings:
         log_level=_read_log_level("INFO"),
         owner_ids=owner_ids,
         default_log_chat_id=default_log_chat_id,
-        environment=os.getenv("ENVIRONMENT", "development").strip().lower() or "development",
+        environment=environment,
         webhook_url=_read_optional_text("WEBHOOK_URL"),
         webhook_secret=_read_optional_text("WEBHOOK_SECRET"),
         newcomer_watch_seconds=newcomer_watch_seconds,

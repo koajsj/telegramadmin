@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from copy import deepcopy
 from datetime import datetime, timezone
 import re
 from zoneinfo import ZoneInfo
@@ -936,7 +937,10 @@ async def template_command(message: Message, app_context: AppContext) -> None:
         if len(parts) != 4:
             await message.answer("用法: /template preview <chat_id> <template>")
             return
-        chat_id = int(parts[2])
+        chat_id = _parse_positive_int(parts[2])
+        if chat_id is None:
+            await message.answer("chat_id 必须是正整数")
+            return
         template = get_template(parts[3])
         if template is None:
             await message.answer("模板不存在")
@@ -964,7 +968,10 @@ async def template_command(message: Message, app_context: AppContext) -> None:
         if len(parts) != 5 or parts[4].lower() != "confirm":
             await message.answer("用法: /template apply <chat_id> <template> confirm")
             return
-        chat_id = int(parts[2])
+        chat_id = _parse_positive_int(parts[2])
+        if chat_id is None:
+            await message.answer("chat_id 必须是正整数")
+            return
         template = get_template(parts[3])
         if template is None:
             await message.answer("模板不存在")
@@ -1020,13 +1027,17 @@ async def night_mode_command(message: Message, app_context: AppContext) -> None:
         return
 
     sub = parts[1].lower()
-    chat_id = int(parts[2])
+    chat_id = _parse_positive_int(parts[2])
+    if chat_id is None:
+        await message.answer("chat_id 必须是正整数")
+        return
     async for session in session_scope(app_context.session_factory):
         chat = await repositories.get_chat_settings(session, chat_id)
         if chat is None:
             await message.answer("群组不存在")
             return
         runtime = repositories.get_chat_runtime_settings(chat)
+        runtime_before_update = deepcopy(runtime)
         night = runtime.get("night_mode")
         if not isinstance(night, dict):
             night = {
@@ -1073,7 +1084,13 @@ async def night_mode_command(message: Message, app_context: AppContext) -> None:
         actor = message.from_user
         if actor is None:
             return
-        await repositories.create_config_snapshot(session, chat_id, actor.id, "before_nightmode_update", runtime)
+        await repositories.create_config_snapshot(
+            session,
+            chat_id,
+            actor.id,
+            "before_nightmode_update",
+            runtime_before_update,
+        )
         await repositories.set_chat_runtime_settings(session, chat_id, runtime)
         await repositories.create_audit_log(
             session=session,
@@ -1096,8 +1113,11 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
             "用法: /falsepositive <chat_id> <violation_id> <reason> <word:xx|domain:xx|user:123|none> [revoke]"
         )
         return
-    chat_id = int(parts[1])
-    violation_id = int(parts[2])
+    chat_id = _parse_positive_int(parts[1])
+    violation_id = _parse_positive_int(parts[2])
+    if chat_id is None or violation_id is None:
+        await message.answer("chat_id 和 violation_id 必须是正整数")
+        return
     reason = parts[3]
     action_token = parts[4]
     revoke = len(parts) >= 6 and parts[5].lower() == "revoke"
@@ -1163,7 +1183,10 @@ async def false_positive_command(message: Message, app_context: AppContext) -> N
                 normalized_value=normalize_domain(domain),
             )
         elif action_token.startswith("user:"):
-            user_id = int(action_token.split(":", 1)[1])
+            user_id = _parse_positive_int(action_token.split(":", 1)[1])
+            if user_id is None:
+                await message.answer("user 白名单参数必须是正整数，例如 user:123456")
+                return
             await repositories.add_whitelist_user(session, chat_id, user_id)
             whitelist_detail = {"type": "user", "value": user_id}
 
@@ -1203,7 +1226,10 @@ async def false_positive_rules_command(message: Message, app_context: AppContext
     if len(parts) != 2:
         await message.answer("用法: /fprules <chat_id>")
         return
-    chat_id = int(parts[1])
+    chat_id = _parse_positive_int(parts[1])
+    if chat_id is None:
+        await message.answer("chat_id 必须是正整数")
+        return
     async for session in session_scope(app_context.session_factory):
         rows = await repositories.top_false_positive_rules(session, chat_id, 10)
     if len(rows) == 0:

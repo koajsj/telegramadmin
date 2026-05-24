@@ -36,7 +36,7 @@ async def run_learning_auto_loop(app_context: AppContext) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "learning_auto_loop_failed",
                 extra={
                     "error_type": type(exc).__name__,

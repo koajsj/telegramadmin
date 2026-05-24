@@ -35,5 +35,5 @@ async def ensure_target_action_allowed(
     async for session in session_scope(session_factory):
         target_whitelisted = await repositories.is_user_whitelisted(session, chat_id, target_user_id)
         if target_whitelisted and not actor_is_owner:
-            return False, "目标在白名单，仅 Bot Owner 可操作"
+            return False, "目标在白名单中，仅 Bot Owner 可操作"
     return True, "ok"

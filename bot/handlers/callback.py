@@ -56,6 +56,9 @@ async def _ensure_target_user_exists(app_context: AppContext, user_id: int) -> N
 @router.callback_query(ModerateAction.filter())
 async def on_moderate_callback(query: CallbackQuery, callback_data: ModerateAction, app_context: AppContext) -> None:
     actor = query.from_user
+    if actor is None:
+        await query.answer("无效操作者", show_alert=True)
+        return
     source_chat_id = query.message.chat.id if query.message is not None and query.message.chat is not None else None
     async for session in session_scope(app_context.session_factory):
         chat_model = await repositories.get_chat_settings(session, callback_data.chat_id)

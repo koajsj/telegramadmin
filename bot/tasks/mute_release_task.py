@@ -77,7 +77,7 @@ async def run_mute_release_loop(bot: Bot, app_context: AppContext) -> None:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.error(
+            logger.exception(
                 "mute_release_loop_failed",
                 extra={
                     "error_type": type(exc).__name__,
